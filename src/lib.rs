@@ -13,8 +13,8 @@ use std::collections::hash_map::HashMap;
 
 use uuid::Uuid;
 
-use datafusion::arrow::array::{Int64Array};
-use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::arrow::array;
+use datafusion::arrow::datatypes::{DataType, TimeUnit, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::arrow::ipc::reader::FileReader;
 
@@ -76,13 +76,16 @@ impl DataFusion {
                 let mut i: usize = 0;
                 for column in batch.columns() {
                     let row = column.slice(row_id - rows, 1);
-                    let arr = row
-                        .as_any()
-                        .downcast_ref::<Int64Array>()
-                        .expect("Failed to downcast");
 
                     let key: JsValue = schema.field(i).name().into();
-                    let value: JsValue = arr.value(0).into();
+                    let value: JsValue = match schema.field(i).data_type() {
+                        DataType::Int64 => row.as_any().downcast_ref::<array::Int64Array>().expect("").value(0).into(),
+                        DataType::Utf8 => row.as_any().downcast_ref::<array::StringArray>().expect("").value(0).into(),
+                        DataType::Boolean => row.as_any().downcast_ref::<array::BooleanArray>().expect("").value(0).into(),
+                        DataType::Float64 => row.as_any().downcast_ref::<array::Float64Array>().expect("").value(0).into(),
+                        DataType::Timestamp(TimeUnit::Second, None) => row.as_any().downcast_ref::<array::TimestampSecondArray>().expect("").value(0).into(),
+                        _ => panic!("Unsupported data type")
+                    };
 
                     js_sys::Reflect::set(&obj, &key, &value).unwrap();
 
@@ -148,14 +151,14 @@ impl DataFusion {
 fn ds() -> Result<Arc<dyn DataFrame>> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("a", DataType::Int64, false),
-        Field::new("b", DataType::Int64, false),
+        Field::new("b", DataType::Utf8, false),
     ]));
 
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            Arc::new(Int64Array::from(vec![2, 20, 20, 200])),
-            Arc::new(Int64Array::from(vec![1, 10, 10, 100])),
+            Arc::new(array::Int64Array::from(vec![2, 20, 20, 200])),
+            Arc::new(array::StringArray::from(vec!["a", "b", "c", "d"])),
         ],
     )?;
 
@@ -166,5 +169,46 @@ fn ds() -> Result<Arc<dyn DataFrame>> {
     let df = ctx.sql("SELECT a, b FROM t WHERE b >= 10")?;
 
     Ok(df)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn downcast_rows() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int64, false),
+            Field::new("b", DataType::Utf8, false),
+            Field::new("c", DataType::Timestamp(TimeUnit::Second, None), false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(array::Int64Array::from(vec![2, 20, 20, 200])),
+                Arc::new(array::StringArray::from(vec!["a", "b", "c", "d"])),
+                Arc::new(array::TimestampSecondArray::from(vec![1642183923, 1642183924, 1642183925, 1642183926])),
+            ],
+        ).unwrap();
+
+        let mut i: usize = 0;
+        for column in batch.columns() {
+            let row = column.slice(0, 1);
+            let dtype = schema.field(i).data_type();
+
+            if dtype == &DataType::Int64 {
+                row.as_any().downcast_ref::<array::Int64Array>().expect("Int64 downcast failed");
+            } else if dtype == &DataType::Utf8 {
+                row.as_any().downcast_ref::<array::StringArray>().expect("Utf8 downcast failed");
+            } else if dtype == &DataType::Timestamp(TimeUnit::Second, None) {
+                row.as_any().downcast_ref::<array::TimestampSecondArray>().expect("Timestamp downcast failed");
+            }
+
+            i+= 1;
+        }
+
+        assert!(true);
+    }
 }
 
