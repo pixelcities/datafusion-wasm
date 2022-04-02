@@ -49,14 +49,45 @@ impl DataFusion {
         DataFusion { inner: Arc::new(DataFusionInner { tables: RefCell::new(HashMap::new()) })}
     }
 
+    pub fn table_exists(&self, table_id: String) -> bool {
+        self.inner.tables.borrow().contains_key(&table_id)
+    }
+
     pub fn nr_tables(&self) -> usize {
-        self.inner.tables.borrow_mut().len()
+        self.inner.tables.borrow().len()
+    }
+
+    pub fn nr_rows(&self, table_id: String) -> usize {
+        match self.inner.tables.borrow().get(&table_id) {
+            Some(table) => {
+                let mut rows: usize = 0;
+
+                for batch in &table.batches {
+                    rows += batch.num_rows();
+                }
+
+                rows
+            },
+            None => panic!("Invalid table id")
+        }
+    }
+
+    pub fn get_schema(&self, table_id: String) -> JsValue {
+        match self.inner.tables.borrow().get(&table_id) {
+            Some(table) => {
+                let batch = &table.batches[0];
+                let schema = batch.schema();
+
+                JsValue::from_serde(&schema).unwrap()
+            },
+            None => panic!("Invalid table id")
+        }
     }
 
     pub fn get_row(&self, table_id: String, row_id: usize) -> Object {
         let obj = js_sys::Object::new();
 
-        match self.inner.tables.borrow_mut().get(&table_id) {
+        match self.inner.tables.borrow().get(&table_id) {
             Some(table) => {
                 let mut rows: usize = 0;
                 let mut batch_id = 0;
@@ -79,11 +110,14 @@ impl DataFusion {
 
                     let key: JsValue = schema.field(i).name().into();
                     let value: JsValue = match schema.field(i).data_type() {
-                        DataType::Int64 => row.as_any().downcast_ref::<array::Int64Array>().expect("").value(0).into(),
+                        DataType::Int32 => row.as_any().downcast_ref::<array::Int32Array>().expect("").value(0).into(),
+                        DataType::Float64 => row.as_any().downcast_ref::<array::Float64Array>().expect("").value(0).into(),
                         DataType::Utf8 => row.as_any().downcast_ref::<array::StringArray>().expect("").value(0).into(),
                         DataType::Boolean => row.as_any().downcast_ref::<array::BooleanArray>().expect("").value(0).into(),
-                        DataType::Float64 => row.as_any().downcast_ref::<array::Float64Array>().expect("").value(0).into(),
                         DataType::Timestamp(TimeUnit::Second, None) => row.as_any().downcast_ref::<array::TimestampSecondArray>().expect("").value(0).into(),
+
+                        // Gets cast to BigInt, which is not that common. Just force Number instead
+                        DataType::Int64 => (row.as_any().downcast_ref::<array::Int64Array>().expect("").value(0) as f64).into(),
                         _ => panic!("Unsupported data type")
                     };
 
@@ -99,8 +133,12 @@ impl DataFusion {
         obj
     }
 
-    pub fn load_table(&self, table: &[u8]) -> String {
-        let id = Uuid::new_v4().to_hyphenated().to_string();
+    pub fn load_table(&self, table: &[u8], table_id: String) -> String {
+        let id = if table_id.is_empty() {
+            Uuid::new_v4().to_hyphenated().to_string()
+        } else {
+            table_id
+        };
 
         let buf = Cursor::new(table);
         let reader = FileReader::try_new(buf).unwrap();
@@ -115,58 +153,45 @@ impl DataFusion {
         id
     }
 
-    pub fn gen_table(&self) -> Promise {
+    pub fn clone_table(&self, table_id: String) -> String {
+        let clone_id = Uuid::new_v4().to_hyphenated().to_string();
+
+        let batches  = self.inner.tables.borrow().get(&table_id).unwrap().batches.clone();
+        self.inner.tables.borrow_mut().insert(clone_id.clone(), Table { batches: batches });
+
+        clone_id
+    }
+
+    pub fn query(&self, table_id: String, query: String) -> Promise {
         let _self = self.inner.clone();
-        let id = Uuid::new_v4().to_hyphenated().to_string();
 
-        let (tx, rx) = oneshot::channel();
+        let batches = _self.tables.borrow().get(&table_id).unwrap().batches.clone();
+        let schema = batches[0].schema();
 
-        spawn_local(async move {
-            let df = ds().unwrap();
+        wasm_bindgen_futures::future_to_promise(async move {
+            let df = execute(&table_id, schema, batches, query).unwrap();
             match df.collect().await {
                 Ok(batches) => {
-                    if batches.len() > 0 {
-                        // just store raw batches because we do not always need MemTable
-                        _self.tables.borrow_mut().insert(id.clone(), Table { batches: batches });
-                    }
+                    _self.tables.borrow_mut().insert(table_id, Table { batches: batches });
+
+                    Ok(JsValue::undefined())
                 },
                 Err(_) => {
                     console::log_1(&"Error collecting dataframe".into());
+
+                    Err(JsValue::undefined())
                 },
-            };
-            drop(tx.send(id));
-        });
-
-        let done = async move {
-            match rx.await {
-                Ok(table_id) => Ok(table_id.into()),
-                Err(_) => Err(JsValue::undefined()),
             }
-        };
-
-        wasm_bindgen_futures::future_to_promise(done)
+        })
     }
 }
 
-fn ds() -> Result<Arc<dyn DataFrame>> {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("a", DataType::Int64, false),
-        Field::new("b", DataType::Utf8, false),
-    ]));
-
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(array::Int64Array::from(vec![2, 20, 20, 200])),
-            Arc::new(array::StringArray::from(vec!["a", "b", "c", "d"])),
-        ],
-    )?;
-
+fn execute(table_id: &String, schema: Arc<Schema>, batches: Vec<RecordBatch>, query: String) -> Result<Arc<dyn DataFrame>> {
     let mut ctx = ExecutionContext::new();
-    let provider = MemTable::try_new(schema, vec![vec![batch]])?;
-    ctx.register_table("t", Arc::new(provider))?;
+    let provider = MemTable::try_new(schema, vec![batches])?;
+    ctx.register_table(table_id.as_str(), Arc::new(provider))?;
 
-    let df = ctx.sql("SELECT a, b FROM t WHERE b >= 10")?;
+    let df = ctx.sql(&query)?;
 
     Ok(df)
 }
