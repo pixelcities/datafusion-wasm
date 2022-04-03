@@ -4,7 +4,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::*;
 use web_sys::console;
 use futures_channel::oneshot;
-use js_sys::{Promise, Object};
+use js_sys::{Promise, Object, Uint8Array};
 
 use std::io::Cursor;
 use std::sync::Arc;
@@ -17,6 +17,7 @@ use datafusion::arrow::array;
 use datafusion::arrow::datatypes::{DataType, TimeUnit, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::arrow::ipc::reader::FileReader;
+use datafusion::arrow::ipc::writer::FileWriter;
 
 use datafusion::datasource::MemTable;
 use datafusion::error::Result;
@@ -183,6 +184,25 @@ impl DataFusion {
                 },
             }
         })
+    }
+
+    pub fn export_table(&self, table_id: String) -> Uint8Array {
+        let batches  = self.inner.tables.borrow().get(&table_id).unwrap().batches.clone();
+        let schema = batches[0].schema();
+
+        let mut buf = Vec::new();
+        {
+            let mut writer = FileWriter::try_new(&mut buf, &schema).unwrap();
+
+            for batch in &batches {
+                writer.write(&batch).unwrap();
+            }
+
+            writer.finish().unwrap();
+        }
+        let result = &buf[..];
+
+        result.into()
     }
 }
 
