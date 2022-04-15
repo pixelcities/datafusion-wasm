@@ -154,13 +154,21 @@ impl DataFusion {
         id
     }
 
-    pub fn clone_table(&self, table_id: String) -> String {
-        let clone_id = Uuid::new_v4().to_hyphenated().to_string();
+    pub fn clone_table(&self, table_id: String, clone_id: String) -> String {
+        let id = if clone_id.is_empty() {
+            Uuid::new_v4().to_hyphenated().to_string()
+        } else {
+            clone_id
+        };
 
         let batches  = self.inner.tables.borrow().get(&table_id).unwrap().batches.clone();
-        self.inner.tables.borrow_mut().insert(clone_id.clone(), Table { batches: batches });
+        self.inner.tables.borrow_mut().insert(id.clone(), Table { batches: batches });
 
-        clone_id
+        id
+    }
+
+    pub fn drop_table(&self, table_id: String) {
+        self.inner.tables.borrow_mut().remove(&table_id);
     }
 
     pub fn query(&self, table_id: String, query: String) -> Promise {
