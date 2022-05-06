@@ -19,6 +19,8 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::arrow::ipc::reader::FileReader;
 use datafusion::arrow::ipc::writer::FileWriter;
 
+use datafusion::logical_plan::Expr;
+use datafusion::physical_plan::window_functions::{WindowFunction, BuiltInWindowFunction};
 use datafusion::datasource::MemTable;
 use datafusion::error::Result;
 use datafusion::prelude::*;
@@ -79,7 +81,7 @@ impl DataFusion {
                 let batch = &table.batches[0];
                 let schema = batch.schema();
 
-                JsValue::from_serde(&schema).unwrap()
+                JsValue::from_serde(&schema.to_json()).unwrap()
             },
             None => panic!("Invalid table id")
         }
@@ -178,12 +180,13 @@ impl DataFusion {
         let schema = batches[0].schema();
 
         wasm_bindgen_futures::future_to_promise(async move {
-            let df = execute(&table_id, schema, batches, query).unwrap();
-            match df.collect().await {
-                Ok(batches) => {
+            let batches = execute(&table_id, schema, batches, query).await;
+            match batches {
+                Ok((batches, artifact)) => {
                     _self.tables.borrow_mut().insert(table_id, Table { batches: batches });
 
-                    Ok(JsValue::undefined())
+                    let artifact_str: Vec<String> = artifact.into_iter().map(|x| x.to_string()).collect();
+                    Ok(artifact_str.join(",").into())
                 },
                 Err(_) => {
                     console::log_1(&"Error collecting dataframe".into());
@@ -214,22 +217,67 @@ impl DataFusion {
     }
 }
 
-fn execute(table_id: &String, schema: Arc<Schema>, batches: Vec<RecordBatch>, query: String) -> Result<Arc<dyn DataFrame>> {
+/// Execute a given query, returning the result and an artifact
+///
+/// The given table is first extended by adding row numbers, which are dropped
+/// again before returning the resulting batches. Instead, the row numbers travel
+/// alongside the given query so that the original row numbers get shuffled around
+/// and are able to capture the mutations to the row order.
+///
+/// The query artifact can be used to apply the same order / unnest operations on
+/// dataset fragments that are not part of the table in this context.
+async fn execute(table_id: &String, schema: Arc<Schema>, batches: Vec<RecordBatch>, query: String) -> Result<(Vec<RecordBatch>, Vec<u64>)> {
     let mut ctx = ExecutionContext::new();
-    let provider = MemTable::try_new(schema, vec![batches])?;
-    ctx.register_table(table_id.as_str(), Arc::new(provider))?;
+    let provider = MemTable::try_new(schema.clone(), vec![batches])?;
 
-    let df = ctx.sql(&query)?;
+    let id = Uuid::new_v4().to_hyphenated().to_string();
+    ctx.register_table(id.as_str(), Arc::new(provider))?;
 
-    Ok(df)
+    // Recreate the table with an additional column containing the original row numbers
+    let mut select: Vec<Expr> = schema.fields().into_iter().map(|field| col(&field.name().clone())).collect();
+    select.push(Expr::Alias(
+        Box::new(Expr::WindowFunction {
+            fun: WindowFunction::BuiltInWindowFunction(BuiltInWindowFunction::RowNumber),
+            args: vec![],
+            partition_by: vec![],
+            order_by: vec![],
+            window_frame: None,
+        }),
+        "__row__".to_string()
+    ));
+
+    // Re-register the modified table with the real table name
+    let df = ctx.table(id.as_str())?.select(select)?;
+    let table = Arc::new(datafusion::execution::dataframe_impl::DataFrameImpl::new(ctx.state.clone(), &df.to_logical_plan()));
+    ctx.register_table(table_id.as_str(), table)?;
+
+    // Execute the given query, note that this currently assumes a `SELECT *`
+    let df = ctx.sql(&query).await?;
+
+    let batches = df.collect().await?;
+
+    // Split off the artifact from the result batches
+    let mut artifact = Vec::new();
+    let mut result = Vec::new();
+    for batch in &batches {
+        let i = batch.schema().index_of("__row__").unwrap();
+
+        let column = batch.column(i);
+        let arr: Vec<u64> = column.as_any().downcast_ref::<array::UInt64Array>().expect("").values().into();
+        artifact.extend(arr);
+
+        let indices: Vec<usize> = (0..i).into_iter().map(|x| x as usize).collect();
+        result.push(batch.project(&indices[..])?);
+    }
+
+    Ok((result, artifact))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn downcast_rows() {
+    fn gen_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
             Field::new("a", DataType::Int64, false),
             Field::new("b", DataType::Utf8, false),
@@ -239,11 +287,35 @@ mod tests {
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![
-                Arc::new(array::Int64Array::from(vec![2, 20, 20, 200])),
+                Arc::new(array::Int64Array::from(vec![2, 22, 20, 200])),
                 Arc::new(array::StringArray::from(vec!["a", "b", "c", "d"])),
                 Arc::new(array::TimestampSecondArray::from(vec![1642183923, 1642183924, 1642183925, 1642183926])),
             ],
         ).unwrap();
+
+        batch
+    }
+
+    #[test]
+    fn test_artifact() {
+        let table_id = "test".to_owned();
+        let batch = gen_batch();
+        let schema = batch.schema();
+
+        let query = "SELECT * FROM test ORDER BY a DESC".to_owned();
+
+        tokio_test::block_on(async move {
+            let (batches, artifact) = execute(&table_id, schema, vec![batch], query).await.unwrap();
+
+            datafusion::arrow::util::pretty::print_batches(&batches);
+            assert_eq!(artifact, vec![4, 2, 3, 1]);
+        });
+    }
+
+    #[test]
+    fn downcast_rows() {
+        let batch = gen_batch();
+        let schema = batch.schema();
 
         let mut i: usize = 0;
         for column in batch.columns() {
