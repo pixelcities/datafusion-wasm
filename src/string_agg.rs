@@ -34,7 +34,6 @@ impl StringAgg {
         match txt {
             ScalarValue::Utf8(Some(txt)) => {
                 self.txt.push_str(txt);
-                self.txt.push(',');
             }
             _ => unreachable!(""),
         };
@@ -52,6 +51,7 @@ impl Accumulator for StringAgg {
     fn evaluate(&self) -> Result<ScalarValue> {
         let mut txt = self.txt.clone();
         txt.pop();
+
         Ok(ScalarValue::from(format!("[{}]", txt).as_str()))
     }
 

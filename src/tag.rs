@@ -1,8 +1,15 @@
 use std::sync::Arc;
+use uuid::Uuid;
 
-use datafusion::arrow::datatypes::{DataType};
+use datafusion::arrow::array;
+use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::arrow::datatypes::{DataType, Schema, Field, UInt64Type};
+use datafusion::execution::dataframe_impl::DataFrameImpl;
 use datafusion::logical_plan::{plan, Expr, DFField, DFSchema, DFSchemaRef};
 use datafusion::logical_plan::plan::LogicalPlan;
+use datafusion::physical_plan::window_functions::{WindowFunction, BuiltInWindowFunction};
+use datafusion::datasource::MemTable;
+use datafusion::error::Result;
 use datafusion::prelude::*;
 
 use crate::string_agg::*;
@@ -152,6 +159,68 @@ pub fn inject(table_id: &String, plan: &LogicalPlan) -> std::result::Result<Logi
     }
 }
 
+pub async fn register_table_with_tag(ctx: &mut ExecutionContext, table_id: &String, schema: Arc<Schema>, batches: Vec<RecordBatch>) -> Result<()> {
+    let provider = MemTable::try_new(schema.clone(), vec![batches])?;
+
+    let id = Uuid::new_v4().to_hyphenated().to_string();
+    ctx.register_table(id.as_str(), Arc::new(provider))?;
+
+    // Recreate the table with an additional column containing the original row numbers
+    let mut select: Vec<Expr> = schema.fields().into_iter().map(|field| col(&field.name().clone())).collect();
+
+    select.push(Expr::Alias(
+            Box::new(Expr::WindowFunction {
+                fun: WindowFunction::BuiltInWindowFunction(BuiltInWindowFunction::RowNumber),
+                args: vec![],
+                partition_by: vec![],
+                order_by: vec![],
+                window_frame: None,
+            }),
+        "__tag__".to_string()
+    ));
+
+    // Rebuild the table with row tags
+    let df = ctx.table(id.as_str())?.select(select)?;
+    let batches = df.collect().await?;
+    let provider = MemTable::try_new(batches[0].schema(), vec![batches])?;
+    let id = Uuid::new_v4().to_hyphenated().to_string();
+    ctx.register_table(id.as_str(), Arc::new(provider))?;
+
+    // Stage 2 (cast), and register with the real table name
+    let mut select: Vec<Expr> = schema.fields().into_iter().map(|field| col(&field.name().clone())).collect();
+    select.push(Expr::Alias(
+        Box::new(Expr::Cast{
+            expr: Box::new(col("__tag__")),
+            data_type: DataType::Utf8
+        }),
+        "__tag__".to_string()
+    ));
+    let df = ctx.table(id.as_str())?.select(select)?;
+    let table = Arc::new(DataFrameImpl::new(ctx.state.clone(), &df.to_logical_plan()));
+    ctx.register_table(table_id.as_str(), table)?;
+
+    Ok(())
+}
+
+pub fn artifact_to_batches(artifact: String) -> Result<Vec<RecordBatch>> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("__ltag__", DataType::Utf8, false),
+        Field::new("__lsort__", DataType::UInt64, false)
+    ]));
+
+    let mut str_builder = array::StringBuilder::new(1);
+    let mut int_builder = array::PrimitiveBuilder::<UInt64Type>::new(1);
+
+    for (i, tag) in artifact.trim_start_matches('[').trim_end_matches(']').split(',').enumerate() {
+        str_builder.append_value(tag)?;
+        int_builder.append_value(i as u64)?;
+    }
+    let str_arr = Arc::new(str_builder.finish());
+    let int_arr = Arc::new(int_builder.finish());
+    let batches = vec![RecordBatch::try_new(schema.clone(), vec![str_arr, int_arr])?];
+
+    Ok(batches)
+}
 
 fn _inject_schema(schema: &DFSchemaRef) -> DFSchemaRef {
     match schema.field_with_unqualified_name("__tag__") {

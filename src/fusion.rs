@@ -12,14 +12,13 @@ use std::collections::hash_map::HashMap;
 use uuid::Uuid;
 
 use datafusion::arrow::array;
-use datafusion::arrow::datatypes::{DataType, TimeUnit, Field, Schema};
+use datafusion::arrow::datatypes::{DataType, TimeUnit, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::arrow::ipc::reader::FileReader;
 use datafusion::arrow::ipc::writer::FileWriter;
 
+use datafusion::logical_plan::{plan, Expr};
 use datafusion::execution::dataframe_impl::DataFrameImpl;
-use datafusion::logical_plan::Expr;
-use datafusion::physical_plan::window_functions::{WindowFunction, BuiltInWindowFunction};
 use datafusion::datasource::MemTable;
 use datafusion::error::Result;
 use datafusion::prelude::*;
@@ -181,10 +180,33 @@ impl DataFusion {
                 Ok((batches, artifact)) => {
                     _self.tables.borrow_mut().insert(table_id, Table { batches: batches });
 
-                    Ok(artifact.join(",").into())
+                    Ok(artifact.into())
                 },
                 Err(_) => {
                     console::log_1(&"Error collecting dataframe".into());
+
+                    Err(JsValue::undefined())
+                },
+            }
+        })
+    }
+
+    pub fn apply_artifact(&self, table_id: String, artifact: String) -> Promise {
+        let _self = self.inner.clone();
+
+        let batches = _self.tables.borrow().get(&table_id).unwrap().batches.clone();
+        let schema = batches[0].schema();
+
+        wasm_bindgen_futures::future_to_promise(async move {
+            let batches = apply_artifact(&table_id, schema, batches, artifact).await;
+            match batches {
+                Ok(batches) => {
+                    _self.tables.borrow_mut().insert(table_id, Table { batches: batches });
+
+                    Ok(JsValue::undefined())
+                },
+                Err(_) => {
+                    console::log_1(&"Error applying artifact".into());
 
                     Err(JsValue::undefined())
                 },
@@ -221,46 +243,9 @@ impl DataFusion {
 ///
 /// The query artifact can be used to apply the same order / unnest operations on
 /// dataset fragments that are not part of the table in this context.
-async fn execute(table_id: &String, schema: Arc<Schema>, batches: Vec<RecordBatch>, query: String) -> Result<(Vec<RecordBatch>, Vec<String>)> {
+async fn execute(table_id: &String, schema: Arc<Schema>, batches: Vec<RecordBatch>, query: String) -> Result<(Vec<RecordBatch>, String)> {
     let mut ctx = ExecutionContext::new();
-    let provider = MemTable::try_new(schema.clone(), vec![batches])?;
-
-    let id = Uuid::new_v4().to_hyphenated().to_string();
-    ctx.register_table(id.as_str(), Arc::new(provider))?;
-
-    // Recreate the table with an additional column containing the original row numbers
-    let mut select: Vec<Expr> = schema.fields().into_iter().map(|field| col(&field.name().clone())).collect();
-
-    select.push(Expr::Alias(
-            Box::new(Expr::WindowFunction {
-                fun: WindowFunction::BuiltInWindowFunction(BuiltInWindowFunction::RowNumber),
-                args: vec![],
-                partition_by: vec![],
-                order_by: vec![],
-                window_frame: None,
-            }),
-        "__tag__".to_string()
-    ));
-
-    // Rebuild the table with row tags
-    let df = ctx.table(id.as_str())?.select(select)?;
-    let batches = df.collect().await?;
-    let provider = MemTable::try_new(batches[0].schema(), vec![batches])?;
-    let id = Uuid::new_v4().to_hyphenated().to_string();
-    ctx.register_table(id.as_str(), Arc::new(provider))?;
-
-    // Stage 2 (cast), and register with the real table name
-    let mut select: Vec<Expr> = schema.fields().into_iter().map(|field| col(&field.name().clone())).collect();
-    select.push(Expr::Alias(
-        Box::new(Expr::Cast{
-            expr: Box::new(col("__tag__")),
-            data_type: DataType::Utf8
-        }),
-        "__tag__".to_string()
-    ));
-    let df = ctx.table(id.as_str())?.select(select)?;
-    let table = Arc::new(DataFrameImpl::new(ctx.state.clone(), &df.to_logical_plan()));
-    ctx.register_table(table_id.as_str(), table)?;
+    register_table_with_tag(&mut ctx, table_id, schema, batches).await?;
 
     // Build a plan, and inject our row tag where needed
     let original_plan = ctx.create_logical_plan(&query)?;
@@ -294,13 +279,95 @@ async fn execute(table_id: &String, schema: Arc<Schema>, batches: Vec<RecordBatc
         result.push(batch.project(&indices[..])?);
     }
 
+    let artifact = format!("[{}]", artifact.join(","));
+
     Ok((result, artifact))
 }
 
+/// Apply an artifact to a table
+///
+/// Strategies:
+/// 1. Reorder
+///     The artifact is of depth 1, which simply unnests to a table of the same size as
+///     the target table. To apply it, the artifact is joined with the target and then
+///     ordered to the original order in the artifact (because joins are destructive to
+///     the table order).
+///
+/// 2. Expansion
+///     The artifact is of depth 1, but some rows may have been dropped or duplicated.
+///     In practice, the same strategy may be applied as reorder because the left join
+///     will automatically take care of expanding duplicate rows and dropping non-existent
+///     ones.
+///
+/// 3. Contraction
+///     The artifact is of depth N>1. An aggregate function has been applied, which has
+///     grouped rows using an aggregate function. For each nested artifact, the grouped
+///     tags in the artifact are joined to the target table, after which a GROUP BY is
+///     applied based on the tag.
+///
+///     The aggregate function that has to be applied for each of the columns needs to
+///     be explicitly defined.
+///
+///     NOTE: Order in middle aggregates is not retained
+///
+/// Returns the resulting batches
+async fn apply_artifact(table_id: &String, schema: Arc<Schema>, batches: Vec<RecordBatch>, artifact: String) -> Result<Vec<RecordBatch>> {
+    // Save original columns
+    let select: Vec<Expr> = schema.fields().into_iter().map(|field| col(&field.name().clone())).collect();
+
+    let mut ctx = ExecutionContext::new();
+    register_table_with_tag(&mut ctx, table_id, schema, batches).await?;
+
+    let artifact_depth = {
+        let mut i = 0;
+        for c in artifact.as_str().chars() {
+            if c != '[' {
+                break;
+            }
+            i += 1;
+        }
+        i
+    };
+
+    // A depth of 1 is just a simple re-order or expansion case
+    let batches = if artifact_depth == 1 {
+        // Build a RecordBatch out of the artifact
+        let batches = artifact_to_batches(artifact)?;
+        let schema = batches[0].schema();
+
+        // Register the artifact
+        let provider = MemTable::try_new(schema, vec![batches])?;
+        ctx.register_table("artifact", Arc::new(provider))?;
+
+        // Join the table to the artifact
+        let left = ctx.table("artifact")?;
+        let right = ctx.table(table_id.as_str())?;
+
+        let df = left.join(right, plan::JoinType::Left, &["__ltag__"], &["__tag__"])?;
+        let df = df.sort(vec![col("__lsort__").sort(true, false)])?;
+        let df = df.select(select)?;
+
+        let batches = df.collect().await?;
+
+        batches
+
+    // A depth higher than 1 means an aggregate function was applied
+    } else if artifact_depth > 1 {
+        // TODO
+        vec![]
+
+    } else {
+        unreachable!("");
+    };
+
+    Ok(batches)
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use datafusion::arrow::util::pretty;
+    use datafusion::arrow::datatypes::Field;
 
     fn gen_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
@@ -322,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn test_artifact() {
+    fn test_sort_artifact() {
         let table_id = "test".to_owned();
         let batch = gen_batch();
         let schema = batch.schema();
@@ -330,9 +397,43 @@ mod tests {
         let query = "SELECT * FROM test ORDER BY a DESC".to_owned();
 
         tokio_test::block_on(async move {
-            let (batches, artifact) = execute(&table_id, schema, vec![batch], query).await.unwrap();
+            // Execute a query, but discard results and save the artifact
+            let (_batches, artifact) = execute(&table_id, schema.clone(), vec![batch.clone()], query).await.unwrap();
 
-            assert_eq!(artifact, vec!["4", "2", "3", "1"]);
+            assert_eq!(artifact, "[4,2,3,1]");
+
+            // Apply the artifact on the original table, without the query
+            let batches = apply_artifact(&table_id, schema, vec![batch], artifact).await.unwrap();
+
+            // This should still return our expected result
+            let expected = "\
+                +-----+---+---------------------+\n\
+                | a   | b | c                   |\n\
+                +-----+---+---------------------+\n\
+                | 200 | b | 2022-01-14 18:12:06 |\n\
+                | 22  | a | 2022-01-14 18:12:04 |\n\
+                | 20  | b | 2022-01-14 18:12:05 |\n\
+                | 2   | a | 2022-01-14 18:12:03 |\n\
+                +-----+---+---------------------+\
+            ";
+            let result: String = pretty::pretty_format_batches(&batches).unwrap().to_string();
+
+            assert_eq!(result.as_str(), expected);
+        });
+    }
+
+    #[test]
+    fn test_agg_artifact() {
+        let table_id = "test".to_owned();
+        let batch = gen_batch();
+        let schema = batch.schema();
+
+        let query = "SELECT SUM(a) FROM test GROUP BY b ORDER BY 1".to_owned();
+
+        tokio_test::block_on(async move {
+            let (_batches, artifact) = execute(&table_id, schema, vec![batch], query).await.unwrap();
+
+            assert_eq!(artifact, "[[1,2],[3,4]]");
         });
     }
 
