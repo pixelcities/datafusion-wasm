@@ -202,24 +202,130 @@ pub async fn register_table_with_tag(ctx: &mut ExecutionContext, table_id: &Stri
     Ok(())
 }
 
-pub fn artifact_to_batches(artifact: String) -> Result<Vec<RecordBatch>> {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("__ltag__", DataType::Utf8, false),
-        Field::new("__lsort__", DataType::UInt64, false)
-    ]));
+/// Build a RecordBatch out of an artifact string
+///
+/// There are two variants that may be constructed. If the artifact
+/// depth is equal to one, it will return a batch with just a sort
+/// and tag column.
+///
+/// If the depth is higher than 1, any number of aggregate functions
+/// may have been applied and need to be replayed. In this case an
+/// additional tag column is added for each of those grouped tags.
+///
+/// Example:
+/// > artifact_to_batches("[[[1,2],[3,4]]]")
+/// . +-----------+----------+-----------+---------------+
+/// . | __lsort__ | __ltag__ | __ltag2__ | __ltag3__     |
+/// . +-----------+----------+-----------+---------------+
+/// . | 1         | 1        | [1,2]     | [[1,2],[3,4]] |
+/// . | 2         | 2        | [1,2]     | [[1,2],[3,4]] |
+/// . | 3         | 3        | [3,4]     | [[1,2],[3,4]] |
+/// . | 4         | 4        | [3,4]     | [[1,2],[3,4]] |
+/// . +-----------+----------+-----------+---------------+
+///
+pub fn artifact_to_batches(artifact: String) -> Result<(u32, Vec<RecordBatch>)> {
+    let depth = {
+        let mut i = 0;
+        for c in artifact.as_str().chars() {
+            if c != '[' {
+                break;
+            }
+            i += 1;
+        }
+        i
+    };
 
-    let mut str_builder = array::StringBuilder::new(1);
-    let mut int_builder = array::PrimitiveBuilder::<UInt64Type>::new(1);
+    let mut fields = vec![
+        Field::new("__lsort__", DataType::UInt64, false),
+        Field::new("__ltag__", DataType::Utf8, false)
+    ];
 
-    for (i, tag) in artifact.trim_start_matches('[').trim_end_matches(']').split(',').enumerate() {
-        str_builder.append_value(tag)?;
-        int_builder.append_value(i as u64)?;
+    for i in 2..depth+1 {
+        fields.push(Field::new(format!("__ltag{}__", i).as_str(), DataType::Utf8, false))
     }
-    let str_arr = Arc::new(str_builder.finish());
-    let int_arr = Arc::new(int_builder.finish());
-    let batches = vec![RecordBatch::try_new(schema.clone(), vec![str_arr, int_arr])?];
 
-    Ok(batches)
+    let schema = Arc::new(Schema::new(fields));
+
+    let mut int_builder = array::PrimitiveBuilder::<UInt64Type>::new(1);
+    let mut str_builders: Vec<array::StringBuilder> = Vec::new();
+    let mut buffers: Vec<String> = Vec::new();
+    let mut sizes: Vec<u64> = Vec::new();
+    for _ in 0..depth {
+        str_builders.push(array::StringBuilder::new(1));
+        buffers.push("".to_string());
+        sizes.push(0);
+    }
+
+    let mut n: usize = 0;
+    let max = depth as usize;
+
+    for c in artifact.as_str().chars() {
+        // Increase current layer by one
+        if c == '[' {
+            n += 1;
+            for i in 0..n-1 {
+                buffers[i].push(c);
+            }
+
+        // A comma signals that the value is complete and it can be appended
+        } else if c == ',' {
+            // Commit the buffer of the current layer
+            if n == max {
+                sizes[n-1] += 1;
+                str_builders[n-1].append_value(buffers[n-1].clone())?;
+                int_builder.append_value(sizes[n-1])?;
+
+            // Outer layers may need to play catch-up
+            } else {
+                let gap = sizes[max-1] - sizes[n-1];
+                for _ in 0..gap {
+                    sizes[n-1] += 1;
+                    str_builders[n-1].append_value(buffers[n-1].clone())?;
+                }
+            }
+            buffers[n-1].truncate(0);
+
+            // Simply append to the buffers of outer layers
+            for i in 0..n-1 {
+                buffers[i].push(c);
+            }
+
+        // Same as comma, but also decreases the current layer by one
+        } else if c == ']' {
+            if n == max {
+                sizes[n-1] += 1;
+                str_builders[n-1].append_value(buffers[n-1].clone())?;
+                int_builder.append_value(sizes[n-1])?;
+            } else {
+                let gap = sizes[max-1] - sizes[n-1];
+                for _ in 0..gap {
+                    sizes[n-1] += 1;
+                    str_builders[n-1].append_value(buffers[n-1].clone())?;
+                }
+            }
+            buffers[n-1].truncate(0);
+
+            for i in 0..n-1 {
+                buffers[i].push(c);
+            }
+
+            n -= 1;
+
+        // Just data, append to buffer
+        } else {
+            for i in 0..n {
+                buffers[i].push(c);
+            }
+        }
+    }
+
+    let mut arrays: Vec<Arc<dyn datafusion::arrow::array::Array>> = vec![Arc::new(int_builder.finish())];
+    for i in 1..max+1 {
+        arrays.push(Arc::new(str_builders[max-i].finish()));
+    }
+    let batches = vec![RecordBatch::try_new(schema.clone(), arrays)?];
+
+    Ok((depth, batches))
 }
 
 fn _inject_schema(schema: &DFSchemaRef) -> DFSchemaRef {

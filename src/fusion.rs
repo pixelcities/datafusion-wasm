@@ -8,6 +8,7 @@ use std::io::Cursor;
 use std::sync::Arc;
 use std::cell::RefCell;
 use std::collections::hash_map::HashMap;
+use std::str::FromStr;
 
 use uuid::Uuid;
 
@@ -18,6 +19,7 @@ use datafusion::arrow::ipc::reader::FileReader;
 use datafusion::arrow::ipc::writer::FileWriter;
 
 use datafusion::logical_plan::{plan, Expr};
+use datafusion::physical_plan::aggregates;
 use datafusion::execution::dataframe_impl::DataFrameImpl;
 use datafusion::datasource::MemTable;
 use datafusion::error::Result;
@@ -312,52 +314,91 @@ async fn execute(table_id: &String, schema: Arc<Schema>, batches: Vec<RecordBatc
 ///
 /// Returns the resulting batches
 async fn apply_artifact(table_id: &String, schema: Arc<Schema>, batches: Vec<RecordBatch>, artifact: String) -> Result<Vec<RecordBatch>> {
+    let mut ctx = ExecutionContext::new();
+    register_table_with_tag(&mut ctx, table_id, schema.clone(), batches).await?;
+
     // Save original columns
     let select: Vec<Expr> = schema.fields().into_iter().map(|field| col(&field.name().clone())).collect();
 
-    let mut ctx = ExecutionContext::new();
-    register_table_with_tag(&mut ctx, table_id, schema, batches).await?;
+    let batches = match artifact_to_batches(artifact)? {
+        // A depth of 1 is just a simple re-order or expansion case
+        (1, batches) => {
+            // Build a RecordBatch out of the artifact
+            let artifact_schema = batches[0].schema();
 
-    let artifact_depth = {
-        let mut i = 0;
-        for c in artifact.as_str().chars() {
-            if c != '[' {
-                break;
+            // Register the artifact
+            let provider = MemTable::try_new(artifact_schema, vec![batches])?;
+            ctx.register_table("artifact", Arc::new(provider))?;
+
+            // Join the table to the artifact
+            let left = ctx.table("artifact")?;
+            let right = ctx.table(table_id.as_str())?;
+
+            let df = left.join(right, plan::JoinType::Left, &["__ltag__"], &["__tag__"])?;
+            let df = df.sort(vec![col("__lsort__").sort(true, false)])?;
+            let df = df.select(select)?;
+
+            let batches = df.collect().await?;
+
+            batches
+        },
+
+        // A depth higher than 1 means an aggregate function was applied
+        (depth, batches) => {
+            let artifact_schema = batches[0].schema();
+
+            let provider = MemTable::try_new(artifact_schema, vec![batches])?;
+            ctx.register_table("artifact", Arc::new(provider))?;
+
+            let left = ctx.table("artifact")?;
+            let right = ctx.table(table_id.as_str())?;
+
+            // Each field is expected to have a preferred default aggregate function specified
+            // in the metadata. Defaults to array_agg if none is found.
+            let aggr_expr: Vec<Expr> = schema.fields().into_iter().map(|field| {
+                let fun = match field.metadata().clone().and_then(|m| m.get("aggregate_fn").and_then(|f| Some(f.clone()))) {
+                    Some(f) => f,
+                    None => "array_agg".to_string()
+                };
+
+                Expr::Alias(
+                    Box::new(Expr::AggregateFunction{
+                        fun: aggregates::AggregateFunction::from_str(&fun).unwrap(),
+                        args: vec![col(&field.name().clone())],
+                        distinct: false
+                    }),
+                    field.name().clone()
+                )
+            }).collect();
+
+            let sort_aggr: Vec<Expr> = vec![
+                Expr::Alias(
+                    Box::new(Expr::AggregateFunction{
+                        fun: aggregates::AggregateFunction::Min,
+                        args: vec![col("__lsort__")],
+                        distinct: false
+                    }),
+                    "__lsort__".to_string()
+                )
+            ];
+
+            // Join with the artifact using the fully unnested tag
+            let mut df = left.join(right, plan::JoinType::Left, &["__ltag__"], &["__tag__"])?;
+
+            // Next, the grouped tags are used to replay the aggregate functions
+            for i in 1..depth {
+                let group_expr: Vec<Expr> = (i+1..depth+1).rev().map(|j| col(&format!("__ltag{}__", j))).collect();
+
+                df = df.aggregate(group_expr, [sort_aggr.clone(), aggr_expr.clone()].concat())?;
             }
-            i += 1;
+
+            let df = df.sort(vec![col("__lsort__").sort(true, false)])?;
+            let df = df.select(select)?;
+
+            let batches = df.collect().await?;
+
+            batches
         }
-        i
-    };
-
-    // A depth of 1 is just a simple re-order or expansion case
-    let batches = if artifact_depth == 1 {
-        // Build a RecordBatch out of the artifact
-        let batches = artifact_to_batches(artifact)?;
-        let schema = batches[0].schema();
-
-        // Register the artifact
-        let provider = MemTable::try_new(schema, vec![batches])?;
-        ctx.register_table("artifact", Arc::new(provider))?;
-
-        // Join the table to the artifact
-        let left = ctx.table("artifact")?;
-        let right = ctx.table(table_id.as_str())?;
-
-        let df = left.join(right, plan::JoinType::Left, &["__ltag__"], &["__tag__"])?;
-        let df = df.sort(vec![col("__lsort__").sort(true, false)])?;
-        let df = df.select(select)?;
-
-        let batches = df.collect().await?;
-
-        batches
-
-    // A depth higher than 1 means an aggregate function was applied
-    } else if artifact_depth > 1 {
-        // TODO
-        vec![]
-
-    } else {
-        unreachable!("");
     };
 
     Ok(batches)
@@ -366,12 +407,15 @@ async fn apply_artifact(table_id: &String, schema: Arc<Schema>, batches: Vec<Rec
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use datafusion::arrow::util::pretty;
     use datafusion::arrow::datatypes::Field;
 
     fn gen_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
-            Field::new("a", DataType::Int64, false),
+            Field::new("a", DataType::Int64, false).with_metadata(Some(BTreeMap::from([
+                ("aggregate_fn".to_string(), "sum".to_string())
+            ]))),
             Field::new("b", DataType::Utf8, false),
             Field::new("c", DataType::Timestamp(TimeUnit::Second, None), false),
         ]));
@@ -428,12 +472,19 @@ mod tests {
         let batch = gen_batch();
         let schema = batch.schema();
 
-        let query = "SELECT SUM(a) FROM test GROUP BY b ORDER BY 1".to_owned();
+        let query = "SELECT SUM(a) AS a FROM test GROUP BY b ORDER BY 1".to_owned();
 
         tokio_test::block_on(async move {
-            let (_batches, artifact) = execute(&table_id, schema, vec![batch], query).await.unwrap();
+            let (_batches, artifact) = execute(&table_id, schema.clone(), vec![batch.clone()], query).await.unwrap();
 
             assert_eq!(artifact, "[[1,2],[3,4]]");
+
+            let batches = apply_artifact(&table_id, schema, vec![batch], artifact).await.unwrap();
+
+            let expected: array::Int64Array = [Some(24), Some(220)].iter().collect();
+            let result = batches[0].column(0).as_any().downcast_ref::<array::Int64Array>().expect("");
+
+            assert_eq!(result, &expected);
         });
     }
 
