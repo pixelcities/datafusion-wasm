@@ -1,0 +1,161 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index f74f53ce..eddb08be 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -20,14 +20,14 @@ members = [
+     "datafusion",
+     "datafusion-common",
+     "datafusion-expr",
+-    "datafusion-cli",
+-    "datafusion-examples",
+-    "benchmarks",
+-    "ballista/rust/client",
+-    "ballista/rust/core",
+-    "ballista/rust/executor",
+-    "ballista/rust/scheduler",
+-    "ballista-examples",
++#   "datafusion-cli",
++#   "datafusion-examples",
++#   "benchmarks",
++#   "ballista/rust/client",
++#   "ballista/rust/core",
++#   "ballista/rust/executor",
++#   "ballista/rust/scheduler",
++#   "ballista-examples",
+ ]
+ 
+ [profile.release]
+diff --git a/datafusion-common/Cargo.toml b/datafusion-common/Cargo.toml
+index a5573138..8a6f1e9c 100644
+--- a/datafusion-common/Cargo.toml
++++ b/datafusion-common/Cargo.toml
+@@ -38,7 +38,7 @@ pyarrow = ["pyo3"]
+ 
+ [dependencies]
+ arrow = { version = "9.0.0", features = ["prettyprint"] }
+-parquet = { version = "9.0.0", features = ["arrow"] }
++parquet = { version = "9.0.0", features = ["base64", "arrow"], default-features = false }
+ avro-rs = { version = "0.13", features = ["snappy"], optional = true }
+ pyo3 = { version = "0.15", optional = true }
+ sqlparser = "0.14"
+diff --git a/datafusion/Cargo.toml b/datafusion/Cargo.toml
+index d521ead9..6cd89b0b 100644
+--- a/datafusion/Cargo.toml
++++ b/datafusion/Cargo.toml
+@@ -52,21 +52,25 @@ avro = ["avro-rs", "num-traits", "datafusion-common/avro"]
+ row = []
+ 
+ [dependencies]
++instant = { version = "0.1", features = [ "wasm-bindgen", "now" ] }
++getrandom = { version = "0.2", features = ["js"] }
++wasm-bindgen-futures = "0.4.29"
++
+ datafusion-common = { path = "../datafusion-common", version = "7.0.0" }
+ datafusion-expr = { path = "../datafusion-expr", version = "7.0.0" }
+ ahash = { version = "0.7", default-features = false }
+ hashbrown = { version = "0.12", features = ["raw"] }
+ arrow = { version = "9.0.0", features = ["prettyprint"] }
+-parquet = { version = "9.0.0", features = ["arrow"] }
++parquet = { version = "9.0.0", features = ["base64", "arrow"], default-features = false }
+ sqlparser = "0.14"
+ paste = "^1.0"
+ num_cpus = "1.13.0"
+-chrono = { version = "0.4", default-features = false }
++chrono = { version = "0.4", features = ["wasmbind"], default-features = false }
+ async-trait = "0.1.41"
+ futures = "0.3"
+ pin-project-lite= "^0.2.7"
+ tokio = { version = "1.0", features = ["macros", "rt", "rt-multi-thread", "sync", "fs", "parking_lot"] }
+-tokio-stream = "0.1"
++tokio-stream = { version = "0.1", default-features = false }
+ log = "^0.4"
+ md-5 = { version = "^0.10.0", optional = true }
+ sha2 = { version = "^0.10.1", optional = true }
+diff --git a/datafusion/src/physical_plan/analyze.rs b/datafusion/src/physical_plan/analyze.rs
+index 6857ad53..7e0e88bb 100644
+--- a/datafusion/src/physical_plan/analyze.rs
++++ b/datafusion/src/physical_plan/analyze.rs
+@@ -18,7 +18,9 @@
+ //! Defines the ANALYZE operator
+ 
+ use std::sync::Arc;
+-use std::{any::Any, time::Instant};
++use std::any::Any;
++
++use instant::Instant;
+ 
+ use crate::{
+     error::{DataFusionError, Result},
+diff --git a/datafusion/src/physical_plan/cross_join.rs b/datafusion/src/physical_plan/cross_join.rs
+index 82ee5618..7e20c4c6 100644
+--- a/datafusion/src/physical_plan/cross_join.rs
++++ b/datafusion/src/physical_plan/cross_join.rs
+@@ -37,7 +37,7 @@ use crate::{
+     scalar::ScalarValue,
+ };
+ use async_trait::async_trait;
+-use std::time::Instant;
++use instant::Instant;
+ 
+ use super::{
+     coalesce_batches::concat_batches, memory::MemoryStream, DisplayFormatType,
+diff --git a/datafusion/src/physical_plan/hash_join.rs b/datafusion/src/physical_plan/hash_join.rs
+index d276ac2e..87942d8d 100644
+--- a/datafusion/src/physical_plan/hash_join.rs
++++ b/datafusion/src/physical_plan/hash_join.rs
+@@ -32,7 +32,8 @@ use arrow::{
+ use smallvec::{smallvec, SmallVec};
+ use std::sync::Arc;
+ use std::{any::Any, usize};
+-use std::{time::Instant, vec};
++use std::vec;
++use instant::Instant;
+ 
+ use async_trait::async_trait;
+ use futures::{Stream, StreamExt, TryStreamExt};
+diff --git a/datafusion/src/physical_plan/metrics/value.rs b/datafusion/src/physical_plan/metrics/value.rs
+index ffb4ebb3..4cbe0c57 100644
+--- a/datafusion/src/physical_plan/metrics/value.rs
++++ b/datafusion/src/physical_plan/metrics/value.rs
+@@ -24,8 +24,9 @@ use std::{
+         atomic::{AtomicUsize, Ordering},
+         Arc,
+     },
+-    time::{Duration, Instant},
++    time::Duration,
+ };
++use instant::Instant;
+ 
+ use parking_lot::Mutex;
+ 
+diff --git a/datafusion/src/physical_plan/windows/window_agg_exec.rs b/datafusion/src/physical_plan/windows/window_agg_exec.rs
+index 163868d0..8b3042f1 100644
+--- a/datafusion/src/physical_plan/windows/window_agg_exec.rs
++++ b/datafusion/src/physical_plan/windows/window_agg_exec.rs
+@@ -241,7 +241,7 @@ pin_project! {
+     /// stream for window aggregation plan
+     pub struct WindowAggStream {
+         schema: SchemaRef,
+-        drop_helper: AbortOnDropSingle<()>,
++        drop_helper: Option<AbortOnDropSingle<()>>,
+         #[pin]
+         output: futures::channel::oneshot::Receiver<ArrowResult<RecordBatch>>,
+         finished: bool,
+@@ -260,7 +260,7 @@ impl WindowAggStream {
+         let (tx, rx) = futures::channel::oneshot::channel();
+         let schema_clone = schema.clone();
+         let elapsed_compute = baseline_metrics.elapsed_compute().clone();
+-        let join_handle = tokio::spawn(async move {
++        wasm_bindgen_futures::spawn_local(async move {
+             let schema = schema_clone.clone();
+             let result =
+                 WindowAggStream::process(input, window_expr, schema, elapsed_compute)
+@@ -272,7 +272,7 @@ impl WindowAggStream {
+ 
+         Self {
+             schema,
+-            drop_helper: AbortOnDropSingle::new(join_handle),
++            drop_helper: None,
+             output: rx,
+             finished: false,
+             baseline_metrics,

@@ -148,7 +148,7 @@ pub fn inject(table_id: &String, plan: &LogicalPlan) -> std::result::Result<Logi
         },
 
         LogicalPlan::TableScan(p) => {
-            if &p.table_name == table_id {
+            if &p.table_name.trim_matches('"') == table_id {
                 Ok(LogicalPlan::TableScan(p.clone()))
             } else {
                 Err(LogicalPlan::TableScan(p.clone()))
