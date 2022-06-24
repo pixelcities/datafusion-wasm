@@ -3,6 +3,7 @@ extern crate console_error_panic_hook;
 use wasm_bindgen::prelude::*;
 use web_sys::console;
 use js_sys::{Promise, Object, Uint8Array};
+use serde_json::value::Value;
 
 use std::io::Cursor;
 use std::sync::Arc;
@@ -131,6 +132,21 @@ impl DataFusion {
         }
 
         obj
+    }
+
+    pub fn update_schema(&self, table_id: String, schema: JsValue) -> () {
+        match self.inner.tables.borrow().get(&table_id) {
+            Some(table) => {
+                let json: Value = JsValue::into_serde(&schema).unwrap();
+                let schema = Schema::from(&json).unwrap();
+                let batches: Vec<RecordBatch> = table.batches.clone().into_iter()
+                    .map(|b| RecordBatch::try_new(Arc::new(schema.clone()), b.columns().to_vec()).unwrap())
+                    .collect();
+
+                self.inner.tables.borrow_mut().insert(table_id, Table { batches: batches });
+            },
+            None => panic!("Invalid table id")
+        }
     }
 
     pub fn load_table(&self, table: &[u8], table_id: String) -> String {
