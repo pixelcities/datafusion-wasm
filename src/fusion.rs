@@ -4,6 +4,7 @@ use wasm_bindgen::prelude::*;
 use web_sys::console;
 use js_sys::{Promise, Object, Uint8Array};
 use serde_json::value::Value;
+use serde_json::json;
 
 use std::io::Cursor;
 use std::sync::Arc;
@@ -209,6 +210,31 @@ impl DataFusion {
         })
     }
 
+    pub fn join(&self, table_id: String, left_id: String, right_id: String, query: String) -> Promise {
+        let _self = self.inner.clone();
+
+        let left_batches = _self.tables.borrow().get(&left_id).unwrap().batches.clone();
+        let left_schema = left_batches[0].schema();
+
+        let right_batches = _self.tables.borrow().get(&right_id).unwrap().batches.clone();
+        let right_schema = right_batches[0].schema();
+
+        wasm_bindgen_futures::future_to_promise(async move {
+            match join(&left_id, &right_id, left_schema, right_schema, left_batches, right_batches, query).await {
+                Ok((batches, (left_artifact, right_artifact))) => {
+                    _self.tables.borrow_mut().insert(table_id, Table { batches: batches });
+
+                    Ok(JsValue::from_serde(&json!([left_artifact, right_artifact])).unwrap())
+                },
+                Err(_) => {
+                    console::log_1(&"Error collecting dataframe".into());
+
+                    Err(JsValue::undefined())
+                },
+            }
+        })
+    }
+
     pub fn apply_artifact(&self, table_id: String, artifact: String) -> Promise {
         let _self = self.inner.clone();
 
@@ -269,6 +295,43 @@ async fn execute(table_id: &String, schema: Arc<Schema>, batches: Vec<RecordBatc
     let original_plan = ctx.create_logical_plan(&query)?;
     let plan = inject(&table_id, &original_plan).unwrap();
 
+    _execute(&mut ctx, plan).await
+}
+
+/// Join two tables, returning one result and two artifacts
+///
+/// Note that currently the query is executed twice to produce both the left
+/// and right side artifacts.
+async fn join(left_id: &String, right_id: &String, left_schema: Arc<Schema>, right_schema: Arc<Schema>, left_batches: Vec<RecordBatch>, right_batches: Vec<RecordBatch>, query: String) -> Result<(Vec<RecordBatch>, (String, String))> {
+    let mut ctx = ExecutionContext::new();
+
+    // Register the left table with tags, right without
+    register_table_with_tag(&mut ctx, left_id, left_schema.clone(), left_batches.clone()).await?;
+    let provider = MemTable::try_new(right_schema.clone(), vec![right_batches.clone()])?;
+    ctx.register_table(right_id.as_str(), Arc::new(provider))?;
+
+    // Build a plan, and inject our row tag where needed
+    let original_plan = ctx.create_logical_plan(&query)?;
+    let plan = inject(&left_id, &original_plan).unwrap();
+
+    let (result, left_artifact) = _execute(&mut ctx, plan).await?;
+
+    // Repeat the entire query but trace the right side this time
+    let mut ctx = ExecutionContext::new();
+
+    register_table_with_tag(&mut ctx, right_id, right_schema, right_batches).await?;
+    let provider = MemTable::try_new(left_schema, vec![left_batches])?;
+    ctx.register_table(left_id.as_str(), Arc::new(provider))?;
+
+    let original_plan = ctx.create_logical_plan(&query)?;
+    let plan = inject(&right_id, &original_plan).unwrap();
+
+    let (_, right_artifact) = _execute(&mut ctx, plan).await?;
+
+    Ok((result, (left_artifact, right_artifact)))
+}
+
+async fn _execute(ctx: &mut ExecutionContext, plan: plan::LogicalPlan) -> Result<(Vec<RecordBatch>, String)> {
     // Execute the modified query
     let df = Arc::new(DataFrameImpl::new(
         ctx.state.clone(),
@@ -479,6 +542,90 @@ mod tests {
             let result: String = pretty::pretty_format_batches(&batches).unwrap().to_string();
 
             assert_eq!(result.as_str(), expected);
+        });
+    }
+
+    #[test]
+    fn test_join_artifact() {
+        let left_id = "left".to_owned();
+        let left_batch = gen_batch();
+        let left_schema = left_batch.schema();
+
+        let right_id = "right".to_owned();
+        let right_schema = Arc::new(Schema::new(vec![
+            Field::new("b", DataType::Utf8, false),
+            Field::new("d", DataType::Int64, false),
+        ]));
+        let right_batch = RecordBatch::try_new(
+            right_schema.clone(),
+            vec![
+                Arc::new(array::StringArray::from(vec!["a", "a", "c"])),
+                Arc::new(array::Int64Array::from(vec![3, 30, 300])),
+            ],
+        ).unwrap();
+
+        let left_query = "SELECT left.b, left.a, right.d FROM left LEFT JOIN right ON left.b = right.b ORDER BY b, a".to_owned();
+        let full_query = "SELECT left.b, left.a, right.d FROM left FULL JOIN right ON left.b = right.b ORDER BY b, a".to_owned();
+
+        tokio_test::block_on(async move {
+            // First test if the left join correctly produces a left and right artifact. Everything
+            // else is pretty much the same as the sort test, except for the possibility of NULL
+            // rows in the right side. See the next test for more info.
+            let (_, (left_artifact, right_artifact)) = join(&left_id, &right_id, left_schema.clone(), right_schema.clone(), vec![left_batch.clone()], vec![right_batch.clone()], left_query).await.unwrap();
+
+            assert_eq!(left_artifact, "[1,1,2,2,3,4]");
+            assert_eq!(right_artifact, "[1,2,1,2,,]");
+
+            // The more difficult case is a full outer join, because it may produces NULLs in both
+            // the left and right side. In practice everything is applied in the same manner, but
+            // what happens behind the scenes is noteworthy.
+            //
+            // The result of a NULL row for either side is an empty value in the artifact due to
+            // the string aggregate, which is parsed as an empty string when converting the
+            // artifact to batches. This empty string will not match the artifact join and again
+            // produce a NULL value in the resulting table.
+            let (_, (left_artifact, right_artifact)) = join(&left_id, &right_id, left_schema.clone(), right_schema.clone(), vec![left_batch.clone()], vec![right_batch.clone()], full_query).await.unwrap();
+
+            assert_eq!(left_artifact, "[1,1,2,2,3,4,]");
+            assert_eq!(right_artifact, "[1,2,1,2,,,3]");
+
+            // An artifact should be applied on the same counterpart
+            let left_batches = apply_artifact(&left_id, left_schema, vec![left_batch], left_artifact).await.unwrap();
+            let right_batches = apply_artifact(&right_id, right_schema, vec![right_batch], right_artifact).await.unwrap();
+
+            // This should result in two halves, both having the NULL rows in the correct places
+            let left_expected = "\
+                +-----+---+---------------------+\n\
+                | a   | b | c                   |\n\
+                +-----+---+---------------------+\n\
+                | 2   | a | 2022-01-14 18:12:03 |\n\
+                | 2   | a | 2022-01-14 18:12:03 |\n\
+                | 22  | a | 2022-01-14 18:12:04 |\n\
+                | 22  | a | 2022-01-14 18:12:04 |\n\
+                | 20  | b | 2022-01-14 18:12:05 |\n\
+                | 200 | b | 2022-01-14 18:12:06 |\n\
+                |     |   |                     |\n\
+                +-----+---+---------------------+\
+            ";
+            let right_expected = "\
+                +---+-----+\n\
+                | b | d   |\n\
+                +---+-----+\n\
+                | a | 3   |\n\
+                | a | 30  |\n\
+                | a | 3   |\n\
+                | a | 30  |\n\
+                |   |     |\n\
+                |   |     |\n\
+                | c | 300 |\n\
+                +---+-----+\
+            ";
+
+            let left_result: String = pretty::pretty_format_batches(&left_batches).unwrap().to_string();
+            let right_result: String = pretty::pretty_format_batches(&left_batches).unwrap().to_string();
+
+            assert_eq!(left_result.as_str(), left_expected);
+            assert_eq!(right_result.as_str(), left_expected);
         });
     }
 
