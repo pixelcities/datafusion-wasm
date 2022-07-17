@@ -183,6 +183,41 @@ impl DataFusion {
         id
     }
 
+    pub fn merge_table(&self, table_id: String, merge_id: String) -> () {
+        let in_batches = self.inner.tables.borrow().get(&table_id).unwrap().batches.clone();
+        let in_schema = in_batches[0].schema();
+
+        let merge_batches = self.inner.tables.borrow().get(&merge_id).unwrap().batches.clone();
+        let merge_schema = merge_batches[0].schema();
+
+        let num_batches = in_batches.len();
+        let batches = (0..num_batches).map(|batch_id| {
+            let n = in_batches[batch_id].num_columns();
+            let arrays = (0..n).map(|i| {
+                let field_name = in_schema.field(i).name();
+
+                match merge_schema.index_of(field_name) {
+                    Ok(j) => merge_batches[batch_id].column(j).clone(),
+                    Err(_) => in_batches[batch_id].column(i).clone()
+                }
+            }).collect();
+
+            RecordBatch::try_new(in_schema.clone(), arrays).unwrap()
+        }).collect();
+
+        self.inner.tables.borrow_mut().insert(table_id, Table { batches: batches });
+        self.inner.tables.borrow_mut().remove(&merge_id);
+    }
+
+    pub fn move_table(&self, table_id: String, target_id: String) -> () {
+        let batches  = self.inner.tables.borrow().get(&table_id).unwrap().batches.clone();
+
+        self.inner.tables.borrow_mut().remove(&table_id);
+        self.inner.tables.borrow_mut().remove(&target_id);
+
+        self.inner.tables.borrow_mut().insert(target_id, Table { batches: batches });
+    }
+
     pub fn drop_table(&self, table_id: String) {
         self.inner.tables.borrow_mut().remove(&table_id);
     }
