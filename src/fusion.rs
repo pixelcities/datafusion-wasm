@@ -183,6 +183,27 @@ impl DataFusion {
         id
     }
 
+    pub fn append_table(&self, table_id: String, append_id: String) -> () {
+        let in_batches = self.inner.tables.borrow().get(&table_id).unwrap().batches.clone();
+        let in_schema = in_batches[0].schema();
+
+        let append_batches = self.inner.tables.borrow().get(&append_id).unwrap().batches.clone();
+        let append_schema = append_batches[0].schema();
+
+        let schema = Schema::try_merge(vec![(*in_schema).clone(), (*append_schema).clone()]).unwrap();
+
+        let num_batches = in_batches.len();
+        let batches = (0..num_batches).map(|batch_id| {
+            let in_arrays = in_batches[batch_id].columns();
+            let append_arrays = append_batches[batch_id].columns();
+
+            RecordBatch::try_new(Arc::new(schema.clone()), [in_arrays, append_arrays].concat()).unwrap()
+        }).collect();
+
+        self.inner.tables.borrow_mut().insert(table_id, Table { batches: batches });
+        self.inner.tables.borrow_mut().remove(&append_id);
+    }
+
     pub fn merge_table(&self, table_id: String, merge_id: String) -> () {
         let in_batches = self.inner.tables.borrow().get(&table_id).unwrap().batches.clone();
         let in_schema = in_batches[0].schema();
@@ -261,8 +282,9 @@ impl DataFusion {
 
                     Ok(JsValue::from_serde(&json!([left_artifact, right_artifact])).unwrap())
                 },
-                Err(_) => {
-                    console::log_1(&"Error collecting dataframe".into());
+                Err(e) => {
+                    console::log_1(&"An error occurred".into());
+                    console::log_1(&e.to_string().into());
 
                     Err(JsValue::undefined())
                 },
