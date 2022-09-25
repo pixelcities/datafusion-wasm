@@ -19,6 +19,7 @@ use datafusion::arrow::datatypes::{DataType, TimeUnit, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::arrow::ipc::reader::FileReader;
 use datafusion::arrow::ipc::writer::FileWriter;
+use datafusion::arrow::csv::writer::Writer;
 
 use datafusion::logical_plan::{plan, Expr};
 use datafusion::physical_plan::aggregates;
@@ -332,6 +333,22 @@ impl DataFusion {
         let result = &buf[..];
 
         result.into()
+    }
+
+    pub fn export_csv(&self, table_id: String) -> String {
+        let batches  = self.inner.tables.borrow().get(&table_id).unwrap().batches.clone();
+
+        let mut buf = Vec::new();
+        {
+            let mut writer = Writer::new(&mut buf);
+
+            for batch in &batches {
+                writer.write(&batch).unwrap();
+            }
+        }
+        let result = &buf[..];
+
+        String::from_utf8_lossy(result).into_owned()
     }
 }
 
