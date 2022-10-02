@@ -99,6 +99,64 @@ index 82ee5618..7e20c4c6 100644
  
  use super::{
      coalesce_batches::concat_batches, memory::MemoryStream, DisplayFormatType,
+diff --git a/datafusion/src/physical_plan/hash_aggregate.rs b/datafusion/src/physical_plan/hash_aggregate.rs
+index b727cdd2..874f2f72 100644
+--- a/datafusion/src/physical_plan/hash_aggregate.rs
++++ b/datafusion/src/physical_plan/hash_aggregate.rs
+@@ -354,7 +354,7 @@ pin_project! {
+         #[pin]
+         output: futures::channel::oneshot::Receiver<ArrowResult<RecordBatch>>,
+         finished: bool,
+-        drop_helper: AbortOnDropSingle<()>,
++        drop_helper: Option<AbortOnDropSingle<()>>
+     }
+ }
+ 
+@@ -567,7 +567,7 @@ impl GroupedHashAggregateStream {
+         let schema_clone = schema.clone();
+         let elapsed_compute = baseline_metrics.elapsed_compute().clone();
+ 
+-        let join_handle = tokio::spawn(async move {
++        wasm_bindgen_futures::spawn_local(async move {
+             let result = compute_grouped_hash_aggregate(
+                 mode,
+                 schema_clone,
+@@ -587,7 +587,7 @@ impl GroupedHashAggregateStream {
+             schema,
+             output: rx,
+             finished: false,
+-            drop_helper: AbortOnDropSingle::new(join_handle),
++            drop_helper: None
+         }
+     }
+ }
+@@ -747,7 +747,7 @@ pin_project! {
+         #[pin]
+         output: futures::channel::oneshot::Receiver<ArrowResult<RecordBatch>>,
+         finished: bool,
+-        drop_helper: AbortOnDropSingle<()>,
++        drop_helper: Option<AbortOnDropSingle<()>>,
+     }
+ }
+ 
+@@ -795,7 +795,7 @@ impl HashAggregateStream {
+ 
+         let schema_clone = schema.clone();
+         let elapsed_compute = baseline_metrics.elapsed_compute().clone();
+-        let join_handle = tokio::spawn(async move {
++        wasm_bindgen_futures::spawn_local(async move {
+             let result = compute_hash_aggregate(
+                 mode,
+                 schema_clone,
+@@ -814,7 +814,7 @@ impl HashAggregateStream {
+             schema,
+             output: rx,
+             finished: false,
+-            drop_helper: AbortOnDropSingle::new(join_handle),
++            drop_helper: None,
+         }
+     }
+ }
 diff --git a/datafusion/src/physical_plan/hash_join.rs b/datafusion/src/physical_plan/hash_join.rs
 index d276ac2e..87942d8d 100644
 --- a/datafusion/src/physical_plan/hash_join.rs

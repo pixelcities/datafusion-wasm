@@ -29,6 +29,8 @@ use datafusion::error::Result;
 use datafusion::prelude::*;
 
 use crate::tag::*;
+use crate::synth::*;
+
 
 struct Table {
     batches: Vec<RecordBatch>
@@ -134,6 +136,27 @@ impl DataFusion {
         }
 
         obj
+    }
+
+    pub fn describe_table(&self, table_id: String) -> Promise {
+        let _self = self.inner.clone();
+
+        let batches = _self.tables.borrow().get(&table_id).unwrap().batches.clone();
+        let schema = batches[0].schema();
+
+        wasm_bindgen_futures::future_to_promise(async move {
+            let batches = describe(&table_id, schema, batches).await;
+            match batches {
+                Ok(result) => {
+                    Ok(JsValue::from_serde(&json!(result)).unwrap())
+                },
+                Err(_) => {
+                    console::log_1(&"Error describing column".into());
+
+                    Err(JsValue::undefined())
+                },
+            }
+        })
     }
 
     pub fn update_schema(&self, table_id: String, schema: JsValue) -> () {
@@ -696,10 +719,10 @@ mod tests {
             ";
 
             let left_result: String = pretty::pretty_format_batches(&left_batches).unwrap().to_string();
-            let right_result: String = pretty::pretty_format_batches(&left_batches).unwrap().to_string();
+            let right_result: String = pretty::pretty_format_batches(&right_batches).unwrap().to_string();
 
             assert_eq!(left_result.as_str(), left_expected);
-            assert_eq!(right_result.as_str(), left_expected);
+            assert_eq!(right_result.as_str(), right_expected);
         });
     }
 
