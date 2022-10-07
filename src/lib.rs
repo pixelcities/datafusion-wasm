@@ -6,6 +6,7 @@ mod fusion;
 mod string_agg;
 mod tag;
 mod synth;
+mod utils;
 
 pub use {
     fusion::DataFusion

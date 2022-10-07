@@ -30,6 +30,7 @@ use datafusion::prelude::*;
 
 use crate::tag::*;
 use crate::synth::*;
+use crate::utils::*;
 
 
 struct Table {
@@ -120,10 +121,23 @@ impl DataFusion {
                         DataType::Utf8 => row.as_any().downcast_ref::<array::StringArray>().expect("").value(0).into(),
                         DataType::Boolean => row.as_any().downcast_ref::<array::BooleanArray>().expect("").value(0).into(),
                         DataType::Timestamp(TimeUnit::Second, None) => row.as_any().downcast_ref::<array::TimestampSecondArray>().expect("").value(0).into(),
+                        DataType::Null => JsValue::null(),
 
                         // Gets cast to BigInt, which is not that common. Just force Number instead
                         DataType::Int64 => (row.as_any().downcast_ref::<array::Int64Array>().expect("").value(0) as f64).into(),
-                        _ => panic!("Unsupported data type")
+
+                        // Supporting all lists is tedious, and as the data is returned for display
+                        // only, we just cast it to a string representation of the array.
+                        DataType::List(_) => {
+                            let list = row.as_any().downcast_ref::<array::ListArray>().expect("");
+                            to_string_array(list.value_type(), list.value(0)).into()
+                        },
+
+                        // Not implemented
+                        other => {
+                            console::log_2(&"Warning: unexpected data type: ".into(), &json!(other).to_string().into());
+                            JsValue::null()
+                        }
                     };
 
                     js_sys::Reflect::set(&obj, &key, &value).unwrap();
