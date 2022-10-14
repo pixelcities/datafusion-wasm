@@ -261,7 +261,16 @@ impl DataFusion {
                 }
             }).collect();
 
-            RecordBatch::try_new(in_schema.clone(), arrays).unwrap()
+            let fields = (0..n).map(|i| {
+                let field_name = in_schema.field(i).name();
+
+                match merge_schema.index_of(field_name) {
+                    Ok(j) => merge_schema.field(j).clone(),
+                    Err(_) => in_schema.field(i).clone()
+                }
+            }).collect();
+
+            RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).unwrap()
         }).collect();
 
         self.inner.tables.borrow_mut().insert(table_id, Table { batches: batches });
