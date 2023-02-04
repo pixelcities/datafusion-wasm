@@ -164,8 +164,8 @@ impl DataFusion {
                 Ok(result) => {
                     Ok(JsValue::from_serde(&json!(result)).unwrap())
                 },
-                Err(_) => {
-                    console::log_1(&"Error describing column".into());
+                Err(e) => {
+                    console::log_2(&"Error describing column:".into(), &e.to_string().into());
 
                     Err(JsValue::undefined())
                 },
@@ -212,6 +212,10 @@ impl DataFusion {
         let id = if clone_id.is_empty() {
             Uuid::new_v4().to_hyphenated().to_string()
         } else {
+            if self.inner.tables.borrow().contains_key(&clone_id) {
+                self.inner.tables.borrow_mut().remove(&clone_id);
+            }
+
             clone_id
         };
 
