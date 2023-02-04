@@ -7,6 +7,8 @@ use datafusion::arrow::datatypes::{DataType, TimeUnit, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::datasource::MemTable;
 use datafusion::error::Result;
+use datafusion::logical_plan::{floor, abs, Expr};
+use datafusion::scalar::ScalarValue;
 use datafusion::prelude::*;
 
 
@@ -19,11 +21,11 @@ struct ColumnDescription {
 }
 
 impl ColumnDescription {
-    fn new(name: &String, data_type: &DataType, min: array::ArrayRef, max: array::ArrayRef) -> Self {
-        let min_value = to_value(data_type, min);
-        let max_value = to_value(data_type, max);
+    fn new(name: &String, data_type: &DataType, min: Value, max: Value) -> Self {
+        // let min_value = to_value(data_type, min);
+        // let max_value = to_value(data_type, max);
 
-        ColumnDescription { name: name.clone(), data_type: data_type.clone(), min: min_value, max: max_value }
+        ColumnDescription { name: name.clone(), data_type: data_type.clone(), min: min, max: max }
     }
 }
 
@@ -58,7 +60,7 @@ pub async fn describe(table_id: &String, schema: Arc<Schema>, batches: Vec<Recor
                 .aggregate(vec![], vec![min(col(field.name()))])?
                 .collect().await?;
 
-            result[0].column(0).clone()
+            to_value(field.data_type(), result[0].column(0).clone())
         };
 
         let max = {
@@ -66,8 +68,45 @@ pub async fn describe(table_id: &String, schema: Arc<Schema>, batches: Vec<Recor
                 .aggregate(vec![], vec![max(col(field.name()))])?
                 .collect().await?;
 
-            result[0].column(0).clone()
+            to_value(field.data_type(), result[0].column(0).clone())
         };
+
+        if field.data_type() == &DataType::Int32 {
+            let _dist_bins: Vec<u64> = {
+                let nr_bins: usize = 2;
+                let min_val: f64 = serde_json::from_value(min.clone()).unwrap();
+                let max_val: f64 = serde_json::from_value(max.clone()).unwrap();
+
+                let bin_size = (max_val - min_val) / (nr_bins as f64);
+                let min_expr = Expr::Literal(ScalarValue::Float64(Some(min_val + (f32::EPSILON) as f64)));
+                let bin_expr = Expr::Literal(ScalarValue::Float64(Some(bin_size)));
+
+                // select count(*)
+                // from <table>
+                // where <field> is not null
+                // group by floor(abs(<field> - (<min>+<epsilon>)) / <bin_size>)
+                // order by <field>
+                let result = ctx.table(table_id.as_str())?
+                    .filter(col(field.name()).is_not_null())?
+                    .aggregate(vec![
+                        Expr::Alias(
+                            Box::new(floor(abs(col(field.name()) - min_expr.clone()) / bin_expr.clone())),
+                            "group_by".to_string()
+                        )], vec![
+                        Expr::Alias(
+                            Box::new(count(col(field.name()))),
+                            "n".to_string()
+                        )])?
+                    .sort(vec![col("group_by").sort(true, true)])?
+                    .select_columns(&["n"])?
+                    .limit(nr_bins)?
+                    .collect().await?;
+
+                let array = result[0].column(0).as_any().downcast_ref::<array::UInt64Array>().expect("");
+
+                (0..nr_bins).map(|i| array.value(i)).collect()
+            };
+        }
 
         descriptions.push(ColumnDescription::new(field.name(), field.data_type(), min, max));
     };
