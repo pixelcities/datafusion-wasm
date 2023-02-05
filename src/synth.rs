@@ -70,7 +70,7 @@ pub async fn describe(table_id: &String, schema: Arc<Schema>, batches: Vec<Recor
         };
 
         let bins: Value = {
-            if field.data_type() == &DataType::Int32 {
+            if is_numeric(field.data_type()) {
                 let nr_bins = 2;
                 let min_val: f64 = serde_json::from_value(min.clone()).unwrap();
                 let max_val: f64 = serde_json::from_value(max.clone()).unwrap();
@@ -109,9 +109,33 @@ pub async fn describe(table_id: &String, schema: Arc<Schema>, batches: Vec<Recor
                         None => 0
                     }
                 }).collect::<Vec<u64>>().into()
+
+            // Assume all strings are categorical for now
+            } else if field.data_type() == &DataType::Utf8 {
+                let result = ctx.table(table_id.as_str())?
+                    .filter(col(field.name()).is_not_null())?
+                    .aggregate(vec![
+                        Expr::Alias(
+                            Box::new(col(field.name())),
+                            "group_by".to_string()
+                        )], vec![
+                        Expr::Alias(
+                            Box::new(count(col(field.name()))),
+                            "n".to_string()
+                        )])?
+                    .sort(vec![col("group_by").sort(true, true)])?
+                    .collect().await?;
+
+                let bins = result[0].column(0).as_any().downcast_ref::<array::StringArray>().expect("");
+                let counts = result[0].column(1).as_any().downcast_ref::<array::UInt64Array>().expect("");
+
+                (0..counts.len()).map(|i| {
+                    // counts.value(i);
+                    bins.value(i).to_string()
+                }).collect::<Vec<String>>().into()
+
             } else {
-                let _dist_bins: Vec<String> = vec![];
-                _dist_bins.into()
+                Vec::<String>::new().into()
             }
         };
 
@@ -123,6 +147,13 @@ pub async fn describe(table_id: &String, schema: Arc<Schema>, batches: Vec<Recor
         attributes: attributes,
         descriptions: descriptions
     })
+}
+
+fn is_numeric(data_type: &DataType) -> bool {
+    data_type == &DataType::Int32 ||
+    data_type == &DataType::Int64 ||
+    data_type == &DataType::Float32 ||
+    data_type == &DataType::Float64
 }
 
 fn to_value(data_type: &DataType, value_array: array::ArrayRef) -> Value {
@@ -171,7 +202,7 @@ mod tests {
             let result = describe(&table_id, schema.clone(), vec![batch.clone()]).await.unwrap();
 
             let json = format!("{}", json!(result));
-            let expected = "{\"num_rows\":4,\"attributes\":[\"a\",\"b\"],\"descriptions\":[{\"name\":\"a\",\"data_type\":\"Int32\",\"min\":2,\"max\":200,\"bins\":[3,1]},{\"name\":\"b\",\"data_type\":\"Utf8\",\"min\":\"a\",\"max\":\"d\",\"bins\":[]}]}";
+            let expected = "{\"num_rows\":4,\"attributes\":[\"a\",\"b\"],\"descriptions\":[{\"name\":\"a\",\"data_type\":\"Int32\",\"min\":2,\"max\":200,\"bins\":[3,1]},{\"name\":\"b\",\"data_type\":\"Utf8\",\"min\":\"a\",\"max\":\"d\",\"bins\":[\"a\",\"b\",\"c\",\"d\"]}]}";
 
             assert_eq!(json, expected);
         });
