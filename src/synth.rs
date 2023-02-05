@@ -17,15 +17,13 @@ struct ColumnDescription {
     name: String,
     data_type: DataType,
     min: Value,
-    max: Value
+    max: Value,
+    bins: Value
 }
 
 impl ColumnDescription {
-    fn new(name: &String, data_type: &DataType, min: Value, max: Value) -> Self {
-        // let min_value = to_value(data_type, min);
-        // let max_value = to_value(data_type, max);
-
-        ColumnDescription { name: name.clone(), data_type: data_type.clone(), min: min, max: max }
+    fn new(name: &String, data_type: &DataType, min: Value, max: Value, bins: Value) -> Self {
+        ColumnDescription { name: name.clone(), data_type: data_type.clone(), min: min, max: max, bins: bins }
     }
 }
 
@@ -71,9 +69,9 @@ pub async fn describe(table_id: &String, schema: Arc<Schema>, batches: Vec<Recor
             to_value(field.data_type(), result[0].column(0).clone())
         };
 
-        if field.data_type() == &DataType::Int32 {
-            let _dist_bins: Vec<u64> = {
-                let nr_bins: usize = 2;
+        let bins: Value = {
+            if field.data_type() == &DataType::Int32 {
+                let nr_bins = 2;
                 let min_val: f64 = serde_json::from_value(min.clone()).unwrap();
                 let max_val: f64 = serde_json::from_value(max.clone()).unwrap();
 
@@ -98,17 +96,26 @@ pub async fn describe(table_id: &String, schema: Arc<Schema>, batches: Vec<Recor
                             "n".to_string()
                         )])?
                     .sort(vec![col("group_by").sort(true, true)])?
-                    .select_columns(&["n"])?
                     .limit(nr_bins)?
                     .collect().await?;
 
-                let array = result[0].column(0).as_any().downcast_ref::<array::UInt64Array>().expect("");
+                let bins = result[0].column(0).as_any().downcast_ref::<array::Float64Array>().expect("").values();
+                let counts = result[0].column(1).as_any().downcast_ref::<array::UInt64Array>().expect("");
 
-                (0..nr_bins).map(|i| array.value(i)).collect()
-            };
-        }
+                (0..nr_bins).map(|bin| {
+                    // The group by will not contain empty bins
+                    match bins.iter().position(|x| x == &(bin as f64)) {
+                        Some(index) => counts.value(index),
+                        None => 0
+                    }
+                }).collect::<Vec<u64>>().into()
+            } else {
+                let _dist_bins: Vec<String> = vec![];
+                _dist_bins.into()
+            }
+        };
 
-        descriptions.push(ColumnDescription::new(field.name(), field.data_type(), min, max));
+        descriptions.push(ColumnDescription::new(field.name(), field.data_type(), min, max, bins));
     };
 
     Ok(TableDescription {
@@ -164,7 +171,7 @@ mod tests {
             let result = describe(&table_id, schema.clone(), vec![batch.clone()]).await.unwrap();
 
             let json = format!("{}", json!(result));
-            let expected = "{\"num_rows\":4,\"attributes\":[\"a\",\"b\"],\"descriptions\":[{\"name\":\"a\",\"data_type\":\"Int32\",\"min\":2,\"max\":200},{\"name\":\"b\",\"data_type\":\"Utf8\",\"min\":\"a\",\"max\":\"d\"}]}";
+            let expected = "{\"num_rows\":4,\"attributes\":[\"a\",\"b\"],\"descriptions\":[{\"name\":\"a\",\"data_type\":\"Int32\",\"min\":2,\"max\":200,\"bins\":[3,1]},{\"name\":\"b\",\"data_type\":\"Utf8\",\"min\":\"a\",\"max\":\"d\",\"bins\":[]}]}";
 
             assert_eq!(json, expected);
         });
