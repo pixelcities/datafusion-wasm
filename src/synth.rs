@@ -261,7 +261,7 @@ pub fn gen_synthethic_dataset(description: TableDescription) -> Vec<ArrayRef> {
 
 fn build_numerical_array<T, U: ArrowPrimitiveType<Native = T>>(num_rows: usize, column: ColumnDescription, rng: &mut OsRng) -> ArrayRef
 where T: uniform::SampleUniform + for<'de> serde::Deserialize<'de> + AsPrimitive<T> + ArrowNativeType, f64: AsPrimitive<T> {
-    let max: T = serde_json::from_value::<f64>(column.max).unwrap().as_();
+    let max = serde_json::from_value::<f64>(column.max).unwrap();
     let bins: Vec<f64> = serde_json::from_value(column.distribution.bins).unwrap();
     let indices: Vec<usize> = (0..bins.len()).collect();
 
@@ -272,10 +272,11 @@ where T: uniform::SampleUniform + for<'de> serde::Deserialize<'de> + AsPrimitive
         let index = (0..num_rows).map(|_| indices[dist.sample(rng)]).collect::<Vec<usize>>();
 
         for i in index {
-            let start: T = bins[i].as_();
-            let end = if i == bins.len()-1 { max } else { bins[i+1].as_() };
+            let start = bins[i];
+            let end = if i == bins.len()-1 { max } else { bins[i+1] };
+
             let uniform = Uniform::from(start..end);
-            let value = uniform.sample(rng) as T;
+            let value: T = uniform.sample(rng).as_();
 
             builder.append_value(value).unwrap();
         }
