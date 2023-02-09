@@ -74,19 +74,28 @@ impl DataFusion {
 
                 rows
             },
-            None => panic!("Invalid table id")
+            None => 0
         }
     }
 
     pub fn get_schema(&self, table_id: String) -> JsValue {
         match self.inner.tables.borrow().get(&table_id) {
             Some(table) => {
-                let batch = &table.batches[0];
-                let schema = batch.schema();
+                if table.batches.len() > 0 {
+                    let batch = &table.batches[0];
+                    let schema = batch.schema();
 
-                JsValue::from_serde(&schema.to_json()).unwrap()
+                    JsValue::from_serde(&schema.to_json()).unwrap()
+
+                } else {
+                    console::log_1(&"Unable to get schema: empty table".into());
+                    JsValue::undefined()
+                }
             },
-            None => panic!("Invalid table id")
+            None => {
+                console::log_1(&"Invalid table id".into());
+                JsValue::undefined()
+            }
         }
     }
 
@@ -154,23 +163,28 @@ impl DataFusion {
 
     pub fn describe_table(&self, table_id: String) -> Promise {
         let _self = self.inner.clone();
+        let batches = _self.tables.borrow().get(&table_id).unwrap_or(&Table { batches: vec![] }).batches.clone();
 
-        let batches = _self.tables.borrow().get(&table_id).unwrap().batches.clone();
-        let schema = batches[0].schema();
+        if batches.len() > 0 {
+            let schema = batches[0].schema();
 
-        wasm_bindgen_futures::future_to_promise(async move {
-            let description = describe(&table_id, schema, batches, None).await;
-            match description {
-                Ok(result) => {
-                    Ok(JsValue::from_serde(&json!(result)).unwrap())
-                },
-                Err(e) => {
-                    console::log_2(&"Error describing column:".into(), &e.to_string().into());
+            wasm_bindgen_futures::future_to_promise(async move {
+                let description = describe(&table_id, schema, batches, None).await;
+                match description {
+                    Ok(result) => {
+                        Ok(JsValue::from_serde(&json!(result)).unwrap())
+                    },
+                    Err(e) => {
+                        console::log_2(&"Error describing column:".into(), &e.to_string().into());
 
-                    Err(JsValue::undefined())
-                },
-            }
-        })
+                        Err(JsValue::undefined())
+                    },
+                }
+            })
+        } else {
+            console::log_1(&"Unable to describe table: empty table".into());
+            wasm_bindgen_futures::future_to_promise(std::future::ready(Err(JsValue::undefined())))
+        }
     }
 
     pub fn synthesize_table(&self, in_table_id: String, out_table_id: String, epsilon: f64) -> Promise {
@@ -191,7 +205,7 @@ impl DataFusion {
                             Ok(out_table_id.into())
                         },
                         Err(e) => {
-                            console::log_2(&"Error describing column:".into(), &e.to_string().into());
+                            console::log_2(&"Error building synthesized table:".into(), &e.to_string().into());
                             Err(JsValue::undefined())
                         }
                     }
@@ -205,18 +219,20 @@ impl DataFusion {
     }
 
     pub fn update_schema(&self, table_id: String, schema: JsValue) -> () {
-        let old_batches = match self.inner.tables.borrow().get(&table_id) {
-            Some(table) => table.batches.clone(),
-            None => panic!("Invalid table id")
+        match self.inner.tables.borrow().get(&table_id) {
+            Some(table) => {
+                let json: Value = JsValue::into_serde(&schema).unwrap();
+                let schema = Schema::from(&json).unwrap();
+                let batches: Vec<RecordBatch> = table.batches.clone().into_iter()
+                    .map(|b| RecordBatch::try_new(Arc::new(schema.clone()), b.columns().to_vec()).unwrap())
+                    .collect();
+
+                self.inner.tables.borrow_mut().insert(table_id, Table { batches: batches });
+            },
+            None => {
+                console::log_1(&"Cannot update schema: invalid table id".into());
+            }
         };
-
-        let json: Value = JsValue::into_serde(&schema).unwrap();
-        let schema = Schema::from(&json).unwrap();
-        let batches: Vec<RecordBatch> = old_batches.into_iter()
-            .map(|b| RecordBatch::try_new(Arc::new(schema.clone()), b.columns().to_vec()).unwrap())
-            .collect();
-
-        self.inner.tables.borrow_mut().insert(table_id, Table { batches: batches });
     }
 
     pub fn load_table(&self, table: &[u8], table_id: String) -> String {
