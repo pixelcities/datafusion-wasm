@@ -159,14 +159,45 @@ impl DataFusion {
         let schema = batches[0].schema();
 
         wasm_bindgen_futures::future_to_promise(async move {
-            let batches = describe(&table_id, schema, batches).await;
-            match batches {
+            let description = describe(&table_id, schema, batches, None).await;
+            match description {
                 Ok(result) => {
                     Ok(JsValue::from_serde(&json!(result)).unwrap())
                 },
                 Err(e) => {
                     console::log_2(&"Error describing column:".into(), &e.to_string().into());
 
+                    Err(JsValue::undefined())
+                },
+            }
+        })
+    }
+
+    pub fn synthesize_table(&self, in_table_id: String, out_table_id: String, epsilon: f64) -> Promise {
+        let _self = self.inner.clone();
+
+        let batches = _self.tables.borrow().get(&in_table_id).unwrap().batches.clone();
+        let schema = batches[0].schema();
+
+        wasm_bindgen_futures::future_to_promise(async move {
+            match describe(&in_table_id, schema.clone(), batches, None).await {
+                Ok(result) => {
+                    let description = add_laplace_noise(result, epsilon);
+                    let arrays = gen_synthethic_dataset(description);
+
+                    match RecordBatch::try_new(schema, arrays) {
+                        Ok(batch) => {
+                            _self.tables.borrow_mut().insert(out_table_id.clone(), Table { batches: vec![batch] });
+                            Ok(out_table_id.into())
+                        },
+                        Err(e) => {
+                            console::log_2(&"Error describing column:".into(), &e.to_string().into());
+                            Err(JsValue::undefined())
+                        }
+                    }
+                },
+                Err(e) => {
+                    console::log_2(&"Error describing column:".into(), &e.to_string().into());
                     Err(JsValue::undefined())
                 },
             }
