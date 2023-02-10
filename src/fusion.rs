@@ -189,49 +189,66 @@ impl DataFusion {
 
     pub fn synthesize_table(&self, in_table_id: String, out_table_id: String, epsilon: f64) -> Promise {
         let _self = self.inner.clone();
+        let batches = _self.tables.borrow().get(&in_table_id).unwrap_or(&Table { batches: vec![]}).batches.clone();
 
-        let batches = _self.tables.borrow().get(&in_table_id).unwrap().batches.clone();
-        let schema = batches[0].schema();
+        if batches.len() > 0 {
+            let schema = batches[0].schema();
 
-        wasm_bindgen_futures::future_to_promise(async move {
-            match describe(&in_table_id, schema.clone(), batches, None).await {
-                Ok(result) => {
-                    let description = add_laplace_noise(result, epsilon);
-                    let arrays = gen_synthethic_dataset(description);
+            wasm_bindgen_futures::future_to_promise(async move {
+                match describe(&in_table_id, schema.clone(), batches, None).await {
+                    Ok(result) => {
+                        let description = add_laplace_noise(result, epsilon);
+                        let arrays = gen_synthethic_dataset(description);
 
-                    match RecordBatch::try_new(schema, arrays) {
-                        Ok(batch) => {
-                            _self.tables.borrow_mut().insert(out_table_id.clone(), Table { batches: vec![batch] });
-                            Ok(out_table_id.into())
-                        },
-                        Err(e) => {
-                            console::log_2(&"Error building synthesized table:".into(), &e.to_string().into());
-                            Err(JsValue::undefined())
+                        match RecordBatch::try_new(schema, arrays) {
+                            Ok(batch) => {
+                                match _self.tables.try_borrow_mut() {
+                                    Ok(mut tables) => {
+                                        tables.insert(out_table_id.clone(), Table { batches: vec![batch] });
+                                        Ok(out_table_id.into())
+                                    },
+                                    Err(_) => Err(JsValue::undefined())
+                                }
+                            },
+                            Err(e) => {
+                                console::log_2(&"Error building synthesized table:".into(), &e.to_string().into());
+                                Err(JsValue::undefined())
+                            }
                         }
-                    }
-                },
-                Err(e) => {
-                    console::log_2(&"Error describing column:".into(), &e.to_string().into());
-                    Err(JsValue::undefined())
-                },
-            }
-        })
+                    },
+                    Err(e) => {
+                        console::log_2(&"Error describing column:".into(), &e.to_string().into());
+                        Err(JsValue::undefined())
+                    },
+                }
+            })
+        } else {
+            console::log_1(&"Unable to synthesize table: empty table".into());
+            wasm_bindgen_futures::future_to_promise(std::future::ready(Err(JsValue::undefined())))
+        }
     }
 
     pub fn update_schema(&self, table_id: String, schema: JsValue) -> () {
-        match self.inner.tables.borrow().get(&table_id) {
-            Some(table) => {
-                let json: Value = JsValue::into_serde(&schema).unwrap();
-                let schema = Schema::from(&json).unwrap();
-                let batches: Vec<RecordBatch> = table.batches.clone().into_iter()
-                    .map(|b| RecordBatch::try_new(Arc::new(schema.clone()), b.columns().to_vec()).unwrap())
-                    .collect();
+        let table_exists = self.inner.tables.borrow().contains_key(&table_id);
 
-                self.inner.tables.borrow_mut().insert(table_id, Table { batches: batches });
-            },
-            None => {
-                console::log_1(&"Cannot update schema: invalid table id".into());
+        if table_exists {
+            let batches = self.inner.tables.borrow().get(&table_id).unwrap().batches.clone();
+            let json: Value = JsValue::into_serde(&schema).unwrap();
+            let schema = Schema::from(&json).unwrap();
+            let batches: Vec<RecordBatch> = batches.clone().into_iter()
+                .map(|b| RecordBatch::try_new(Arc::new(schema.clone()), b.columns().to_vec()).unwrap())
+                .collect();
+
+            match self.inner.tables.try_borrow_mut() {
+                Ok(mut tables) => {
+                    tables.insert(table_id, Table { batches: batches });
+                },
+                Err(_) => {
+                    console::log_1(&"Cannot update schema: a table is immutably borrowed".into());
+                }
             }
+        } else {
+            console::log_1(&"Cannot update schema: invalid table id".into());
         };
     }
 
@@ -249,7 +266,14 @@ impl DataFusion {
             .collect();
 
         if batches.len() > 0 {
-            self.inner.tables.borrow_mut().insert(id.clone(), Table { batches: batches });
+            match self.inner.tables.try_borrow_mut() {
+                Ok(mut tables) => {
+                    tables.insert(id.clone(), Table { batches: batches });
+                },
+                Err(_) => {
+                    console::log_1(&"Cannot load table: a table is immutably borrowed".into());
+                }
+            }
         }
 
         id
@@ -260,180 +284,264 @@ impl DataFusion {
             Uuid::new_v4().to_hyphenated().to_string()
         } else {
             if self.inner.tables.borrow().contains_key(&clone_id) {
-                self.inner.tables.borrow_mut().remove(&clone_id);
+                match self.inner.tables.try_borrow_mut() {
+                    Ok(mut tables) => {
+                        tables.remove(&clone_id);
+                    },
+                    Err(_) => {}
+                }
             }
 
             clone_id
         };
 
         let batches  = self.inner.tables.borrow().get(&table_id).unwrap().batches.clone();
-        self.inner.tables.borrow_mut().insert(id.clone(), Table { batches: batches });
+        match self.inner.tables.try_borrow_mut() {
+            Ok(mut tables) => {
+                tables.insert(id.clone(), Table { batches: batches });
+            },
+            Err(_) => {
+                console::log_1(&"Cannot clone table: a table is immutably borrowed".into());
+            }
+        };
 
         id
     }
 
     pub fn append_table(&self, table_id: String, append_id: String) -> () {
-        let in_batches = self.inner.tables.borrow().get(&table_id).unwrap().batches.clone();
-        let in_schema = in_batches[0].schema();
+        let in_batches = self.inner.tables.borrow().get(&table_id).unwrap_or(&Table { batches: vec![] }).batches.clone();
+        let append_batches = self.inner.tables.borrow().get(&append_id).unwrap_or(&Table { batches: vec![] }).batches.clone();
 
-        let append_batches = self.inner.tables.borrow().get(&append_id).unwrap().batches.clone();
-        let append_schema = append_batches[0].schema();
+        if in_batches.len() > 0 && append_batches.len() > 0 {
+            let in_schema = in_batches[0].schema();
+            let append_schema = append_batches[0].schema();
 
-        let schema = Schema::try_merge(vec![(*in_schema).clone(), (*append_schema).clone()]).unwrap();
+            let schema = Schema::try_merge(vec![(*in_schema).clone(), (*append_schema).clone()]).unwrap();
 
-        let num_batches = in_batches.len();
-        let batches = (0..num_batches).map(|batch_id| {
-            let in_arrays = in_batches[batch_id].columns();
-            let append_arrays = append_batches[batch_id].columns();
+            let num_batches = in_batches.len();
+            let batches = (0..num_batches).map(|batch_id| {
+                let in_arrays = in_batches[batch_id].columns();
+                let append_arrays = append_batches[batch_id].columns();
 
-            RecordBatch::try_new(Arc::new(schema.clone()), [in_arrays, append_arrays].concat()).unwrap()
-        }).collect();
+                RecordBatch::try_new(Arc::new(schema.clone()), [in_arrays, append_arrays].concat()).unwrap()
+            }).collect();
 
-        self.inner.tables.borrow_mut().insert(table_id, Table { batches: batches });
-        self.inner.tables.borrow_mut().remove(&append_id);
+            match self.inner.tables.try_borrow_mut() {
+                Ok(mut tables) => {
+                    tables.insert(table_id, Table { batches: batches });
+                    tables.remove(&append_id);
+                },
+                Err(_) => {
+                    console::log_1(&"Cannot append table: a table is immutably borrowed".into());
+                }
+            };
+        }
     }
 
     pub fn merge_table(&self, table_id: String, merge_id: String) -> () {
-        let in_batches = self.inner.tables.borrow().get(&table_id).unwrap().batches.clone();
-        let in_schema = in_batches[0].schema();
+        let in_batches = self.inner.tables.borrow().get(&table_id).unwrap_or(&Table { batches: vec![] }).batches.clone();
+        let merge_batches = self.inner.tables.borrow().get(&merge_id).unwrap_or(&Table { batches: vec![] }).batches.clone();
 
-        let merge_batches = self.inner.tables.borrow().get(&merge_id).unwrap().batches.clone();
-        let merge_schema = merge_batches[0].schema();
+        if in_batches.len() > 0 && merge_batches.len() > 0 {
+            let in_schema = in_batches[0].schema();
+            let merge_schema = merge_batches[0].schema();
 
-        let num_batches = in_batches.len();
-        let batches = (0..num_batches).map(|batch_id| {
-            let n = in_batches[batch_id].num_columns();
-            let arrays = (0..n).map(|i| {
-                let field_name = in_schema.field(i).name();
+            let num_batches = in_batches.len();
+            let batches = (0..num_batches).map(|batch_id| {
+                let n = in_batches[batch_id].num_columns();
+                let arrays = (0..n).map(|i| {
+                    let field_name = in_schema.field(i).name();
 
-                match merge_schema.index_of(field_name) {
-                    Ok(j) => merge_batches[batch_id].column(j).clone(),
-                    Err(_) => in_batches[batch_id].column(i).clone()
-                }
+                    match merge_schema.index_of(field_name) {
+                        Ok(j) => merge_batches[batch_id].column(j).clone(),
+                        Err(_) => in_batches[batch_id].column(i).clone()
+                    }
+                }).collect();
+
+                let fields = (0..n).map(|i| {
+                    let field_name = in_schema.field(i).name();
+
+                    match merge_schema.index_of(field_name) {
+                        Ok(j) => merge_schema.field(j).clone(),
+                        Err(_) => in_schema.field(i).clone()
+                    }
+                }).collect();
+
+                RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).unwrap()
             }).collect();
 
-            let fields = (0..n).map(|i| {
-                let field_name = in_schema.field(i).name();
-
-                match merge_schema.index_of(field_name) {
-                    Ok(j) => merge_schema.field(j).clone(),
-                    Err(_) => in_schema.field(i).clone()
+            match self.inner.tables.try_borrow_mut() {
+                Ok(mut tables) => {
+                    tables.insert(table_id, Table { batches: batches });
+                    tables.remove(&merge_id);
+                },
+                Err(_) => {
+                    console::log_1(&"Cannot merge table: a table is immutably borrowed".into());
                 }
-            }).collect();
-
-            RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).unwrap()
-        }).collect();
-
-        self.inner.tables.borrow_mut().insert(table_id, Table { batches: batches });
-        self.inner.tables.borrow_mut().remove(&merge_id);
+            };
+        }
     }
 
     pub fn move_table(&self, table_id: String, target_id: String) -> () {
         let batches  = self.inner.tables.borrow().get(&table_id).unwrap().batches.clone();
 
-        self.inner.tables.borrow_mut().remove(&table_id);
-        self.inner.tables.borrow_mut().remove(&target_id);
+        match self.inner.tables.try_borrow_mut() {
+            Ok(mut tables) => {
+                tables.remove(&table_id);
+                tables.remove(&target_id);
 
-        self.inner.tables.borrow_mut().insert(target_id, Table { batches: batches });
+                tables.insert(target_id, Table { batches: batches });
+            },
+            Err(_) => {
+                console::log_1(&"Cannot move table: a table is immutably borrowed".into());
+            }
+        };
     }
 
     pub fn drop_table(&self, table_id: String) {
-        self.inner.tables.borrow_mut().remove(&table_id);
+        match self.inner.tables.try_borrow_mut() {
+            Ok(mut tables) => {
+                tables.remove(&table_id);
+            },
+            Err(_) => {
+                console::log_1(&"Cannot drop table: a table is immutably borrowed".into());
+            }
+        };
     }
 
     pub fn query(&self, table_id: String, query: String) -> Promise {
         let _self = self.inner.clone();
+        let batches = _self.tables.borrow().get(&table_id).unwrap_or(&Table { batches: vec![] }).batches.clone();
 
-        let batches = _self.tables.borrow().get(&table_id).unwrap().batches.clone();
-        let schema = batches[0].schema();
+        if batches.len() > 0 {
+            let schema = batches[0].schema();
 
-        wasm_bindgen_futures::future_to_promise(async move {
-            let batches = execute(&table_id, schema, batches, query).await;
-            match batches {
-                Ok((batches, artifact)) => {
-                    _self.tables.borrow_mut().insert(table_id, Table { batches: batches });
+            wasm_bindgen_futures::future_to_promise(async move {
+                let batches = execute(&table_id, schema, batches, query).await;
+                match batches {
+                    Ok((batches, artifact)) => {
+                        match _self.tables.try_borrow_mut() {
+                            Ok(mut tables) => {
+                                tables.insert(table_id, Table { batches: batches });
+                                Ok(artifact.into())
+                            },
+                            Err(_) => {
+                                console::log_1(&"Cannot query table: a table is immutably borrowed".into());
+                                Err(JsValue::undefined())
+                            }
+                        }
+                    },
+                    Err(_) => {
+                        console::log_1(&"Error collecting dataframe".into());
 
-                    Ok(artifact.into())
-                },
-                Err(_) => {
-                    console::log_1(&"Error collecting dataframe".into());
-
-                    Err(JsValue::undefined())
-                },
-            }
-        })
+                        Err(JsValue::undefined())
+                    },
+                }
+            })
+        } else {
+            console::log_1(&"Cannot query: empty table".into());
+            wasm_bindgen_futures::future_to_promise(std::future::ready(Err(JsValue::undefined())))
+        }
     }
 
     pub fn join(&self, table_id: String, left_id: String, right_id: String, query: String) -> Promise {
         let _self = self.inner.clone();
 
-        let left_batches = _self.tables.borrow().get(&left_id).unwrap().batches.clone();
-        let left_schema = left_batches[0].schema();
+        let left_batches = _self.tables.borrow().get(&left_id).unwrap_or(&Table { batches: vec![] }).batches.clone();
+        let right_batches = _self.tables.borrow().get(&right_id).unwrap_or(&Table { batches: vec![] }).batches.clone();
 
-        let right_batches = _self.tables.borrow().get(&right_id).unwrap().batches.clone();
-        let right_schema = right_batches[0].schema();
+        if left_batches.len() > 0 && right_batches.len() > 0 {
+            let left_schema = left_batches[0].schema();
+            let right_schema = right_batches[0].schema();
 
-        wasm_bindgen_futures::future_to_promise(async move {
-            match join(&left_id, &right_id, left_schema, right_schema, left_batches, right_batches, query).await {
-                Ok((batches, (left_artifact, right_artifact))) => {
-                    _self.tables.borrow_mut().insert(table_id, Table { batches: batches });
+            wasm_bindgen_futures::future_to_promise(async move {
+                match join(&left_id, &right_id, left_schema, right_schema, left_batches, right_batches, query).await {
+                    Ok((batches, (left_artifact, right_artifact))) => {
+                        match _self.tables.try_borrow_mut() {
+                            Ok(mut tables) => {
+                                tables.insert(table_id, Table { batches: batches });
 
-                    Ok(JsValue::from_serde(&json!([left_artifact, right_artifact])).unwrap())
-                },
-                Err(e) => {
-                    console::log_1(&"An error occurred".into());
-                    console::log_1(&e.to_string().into());
-
-                    Err(JsValue::undefined())
-                },
-            }
-        })
+                                Ok(JsValue::from_serde(&json!([left_artifact, right_artifact])).unwrap())
+                            },
+                            Err(_) => {
+                                console::log_1(&"Cannot join: a table is immutably borrowed".into());
+                                Err(JsValue::undefined())
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        console::log_2(&"Cannot join:".into(), &e.to_string().into());
+                        Err(JsValue::undefined())
+                    },
+                }
+            })
+        } else {
+            console::log_1(&"Cannot join: one or more of the tables are empty".into());
+            wasm_bindgen_futures::future_to_promise(std::future::ready(Err(JsValue::undefined())))
+        }
     }
 
     pub fn apply_artifact(&self, table_id: String, artifact: String) -> Promise {
         let _self = self.inner.clone();
+        let batches = _self.tables.borrow().get(&table_id).unwrap_or(&Table { batches: vec![] }).batches.clone();
 
-        let batches = _self.tables.borrow().get(&table_id).unwrap().batches.clone();
-        let schema = batches[0].schema();
+        if batches.len() > 0 {
+            let schema = batches[0].schema();
 
-        wasm_bindgen_futures::future_to_promise(async move {
-            let batches = apply_artifact(&table_id, schema, batches, artifact).await;
-            match batches {
-                Ok(batches) => {
-                    _self.tables.borrow_mut().insert(table_id, Table { batches: batches });
+            wasm_bindgen_futures::future_to_promise(async move {
+                let batches = apply_artifact(&table_id, schema, batches, artifact).await;
+                match batches {
+                    Ok(batches) => {
+                        match _self.tables.try_borrow_mut() {
+                            Ok(mut tables) => {
+                                tables.insert(table_id, Table { batches: batches });
+                                Ok(JsValue::undefined())
+                            },
+                            Err(_) => {
+                                console::log_1(&"Cannot apply artifact: a table is immutably borrowed".into());
+                                Err(JsValue::undefined())
+                            }
+                        }
+                    },
+                    Err(_) => {
+                        console::log_1(&"Error applying artifact".into());
 
-                    Ok(JsValue::undefined())
-                },
-                Err(_) => {
-                    console::log_1(&"Error applying artifact".into());
-
-                    Err(JsValue::undefined())
-                },
-            }
-        })
+                        Err(JsValue::undefined())
+                    },
+                }
+            })
+        } else {
+            console::log_1(&"Cannot apply artifact: empty table".into());
+            wasm_bindgen_futures::future_to_promise(std::future::ready(Err(JsValue::undefined())))
+        }
     }
 
     pub fn export_table(&self, table_id: String) -> Uint8Array {
-        let batches  = self.inner.tables.borrow().get(&table_id).unwrap().batches.clone();
-        let schema = batches[0].schema();
+        let batches  = self.inner.tables.borrow().get(&table_id).unwrap_or(&Table { batches: vec![] }).batches.clone();
 
-        let mut buf = Vec::new();
-        {
-            let mut writer = FileWriter::try_new(&mut buf, &schema).unwrap();
+        if batches.len() > 0 {
+            let schema = batches[0].schema();
 
-            for batch in &batches {
-                writer.write(&batch).unwrap();
+            let mut buf = Vec::new();
+            {
+                let mut writer = FileWriter::try_new(&mut buf, &schema).unwrap();
+
+                for batch in &batches {
+                    writer.write(&batch).unwrap();
+                }
+
+                writer.finish().unwrap();
             }
+            let result = &buf[..];
 
-            writer.finish().unwrap();
+            result.into()
+        } else {
+            Uint8Array::new_with_length(0)
         }
-        let result = &buf[..];
-
-        result.into()
     }
 
     pub fn export_csv(&self, table_id: String) -> String {
-        let batches  = self.inner.tables.borrow().get(&table_id).unwrap().batches.clone();
+        let batches  = self.inner.tables.borrow().get(&table_id).unwrap_or(&Table { batches: vec![] }).batches.clone();
 
         let mut buf = Vec::new();
         {
