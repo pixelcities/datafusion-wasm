@@ -116,44 +116,49 @@ impl DataFusion {
                     batch_id += 1;
                 }
 
-                let batch = &table.batches[batch_id];
-                let schema = batch.schema();
+                if &table.batches.len() > &batch_id {
+                    let batch = &table.batches[batch_id];
+                    let schema = batch.schema();
 
-                let mut i: usize = 0;
-                for column in batch.columns() {
-                    let row = column.slice(row_id - rows, 1);
+                    let mut i: usize = 0;
+                    for column in batch.columns() {
+                        let row = column.slice(row_id - rows, 1);
 
-                    let key: JsValue = schema.field(i).name().into();
-                    let value: JsValue = match schema.field(i).data_type() {
-                        DataType::Int32 => row.as_any().downcast_ref::<array::Int32Array>().expect("").value(0).into(),
-                        DataType::Float64 => row.as_any().downcast_ref::<array::Float64Array>().expect("").value(0).into(),
-                        DataType::Utf8 => row.as_any().downcast_ref::<array::StringArray>().expect("").value(0).into(),
-                        DataType::Boolean => row.as_any().downcast_ref::<array::BooleanArray>().expect("").value(0).into(),
-                        DataType::Timestamp(TimeUnit::Second, None) => row.as_any().downcast_ref::<array::TimestampSecondArray>().expect("").value(0).into(),
-                        DataType::Null => JsValue::null(),
+                        let key: JsValue = schema.field(i).name().into();
+                        let value: JsValue = if !row.is_null(0) {
+                            match schema.field(i).data_type() {
+                                DataType::Int32 => row.as_any().downcast_ref::<array::Int32Array>().expect("").value(0).into(),
+                                DataType::Float64 => row.as_any().downcast_ref::<array::Float64Array>().expect("").value(0).into(),
+                                DataType::Utf8 => row.as_any().downcast_ref::<array::StringArray>().expect("").value(0).into(),
+                                DataType::Boolean => row.as_any().downcast_ref::<array::BooleanArray>().expect("").value(0).into(),
+                                DataType::Timestamp(TimeUnit::Second, None) => row.as_any().downcast_ref::<array::TimestampSecondArray>().expect("").value(0).into(),
+                                DataType::Null => JsValue::null(),
 
-                        // Gets cast to BigInt, which is not that common. Just force Number instead
-                        DataType::Int64 => (row.as_any().downcast_ref::<array::Int64Array>().expect("").value(0) as f64).into(),
+                                // Gets cast to BigInt, which is not that common. Just force Number instead
+                                DataType::Int64 => (row.as_any().downcast_ref::<array::Int64Array>().expect("").value(0) as f64).into(),
 
-                        // Supporting all lists is tedious, and as the data is returned for display
-                        // only, we just cast it to a string representation of the array.
-                        DataType::List(_) => {
-                            let list = row.as_any().downcast_ref::<array::ListArray>().expect("");
-                            to_string_array(list.value_type(), list.value(0)).into()
-                        },
+                                // Supporting all lists is tedious, and as the data is returned for display
+                                // only, we just cast it to a string representation of the array.
+                                DataType::List(_) => {
+                                    let list = row.as_any().downcast_ref::<array::ListArray>().expect("");
+                                    to_string_array(list.value_type(), list.value(0)).into()
+                                },
 
-                        // Not implemented
-                        other => {
-                            console::log_2(&"Warning: unexpected data type: ".into(), &json!(other).to_string().into());
+                                // Not implemented
+                                other => {
+                                    console::log_2(&"Warning: unexpected data type: ".into(), &json!(other).to_string().into());
+                                    JsValue::null()
+                                }
+                            }
+                        } else {
                             JsValue::null()
-                        }
-                    };
+                        };
 
-                    js_sys::Reflect::set(&obj, &key, &value).unwrap();
+                        js_sys::Reflect::set(&obj, &key, &value).unwrap();
 
-                    i += 1;
+                        i += 1;
+                    }
                 }
-
             },
             None => {}
         }
