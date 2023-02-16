@@ -130,7 +130,7 @@ impl DataFusion {
                                 DataType::Int32 => row.as_any().downcast_ref::<array::Int32Array>().expect("").value(0).into(),
                                 DataType::Float64 => row.as_any().downcast_ref::<array::Float64Array>().expect("").value(0).into(),
                                 DataType::Utf8 => row.as_any().downcast_ref::<array::StringArray>().expect("").value(0).into(),
-                                DataType::Boolean => row.as_any().downcast_ref::<array::BooleanArray>().expect("").value(0).into(),
+                                DataType::Boolean => row.as_any().downcast_ref::<array::BooleanArray>().expect("").value(0).to_string().into(),
                                 DataType::Timestamp(TimeUnit::Second, None) => row.as_any().downcast_ref::<array::TimestampSecondArray>().expect("").value(0).into(),
                                 DataType::Null => JsValue::null(),
 
@@ -254,6 +254,52 @@ impl DataFusion {
             }
         } else {
             console::log_1(&"Cannot update schema: invalid table id".into());
+        };
+    }
+
+    pub fn drop_columns(&self, table_id: String, drop_columns: JsValue) -> () {
+        let batches = self.inner.tables.borrow().get(&table_id).unwrap_or(&Table { batches: vec![] }).batches.clone();
+        let num_batches = batches.len();
+        let columns: Vec<String> = JsValue::into_serde(&drop_columns).unwrap();
+
+        if num_batches > 0 {
+            let schema = batches[0].schema();
+
+            let batches = (0..num_batches).map(|batch_id| {
+                let n = batches[batch_id].num_columns();
+                let arrays = (0..n).filter_map(|i| {
+                    let field_name = schema.field(i).name();
+
+                    if !columns.contains(&field_name) {
+                        Some(batches[batch_id].column(i).clone())
+                    } else {
+                        None
+                    }
+                }).collect();
+
+                let fields = (0..n).filter_map(|i| {
+                    let field_name = schema.field(i).name();
+
+                    if !columns.contains(&field_name) {
+                        Some(schema.field(i).clone())
+                    } else {
+                        None
+                    }
+                }).collect();
+
+                RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).unwrap()
+            }).collect();
+
+            match self.inner.tables.try_borrow_mut() {
+                Ok(mut tables) => {
+                    tables.insert(table_id, Table { batches: batches });
+                },
+                Err(_) => {
+                    console::log_1(&"Cannot drop columns: a table is immutably borrowed".into());
+                }
+            }
+        } else {
+            console::log_1(&"Cannot drop columns: invalid table id".into());
         };
     }
 
@@ -436,8 +482,8 @@ impl DataFusion {
                             }
                         }
                     },
-                    Err(_) => {
-                        console::log_1(&"Error collecting dataframe".into());
+                    Err(e) => {
+                        console::log_2(&"Error executing query:".into(), &e.to_string().into());
 
                         Err(JsValue::undefined())
                     },
