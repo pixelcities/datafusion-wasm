@@ -15,6 +15,7 @@ use std::str::FromStr;
 use uuid::Uuid;
 
 use datafusion::arrow::array;
+use datafusion::arrow::array::ArrayRef;
 use datafusion::arrow::datatypes::{DataType, TimeUnit, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::arrow::ipc::reader::FileReader;
@@ -240,16 +241,24 @@ impl DataFusion {
             let batches = self.inner.tables.borrow().get(&table_id).unwrap().batches.clone();
             let json: Value = JsValue::into_serde(&schema).unwrap();
             let schema = Schema::from(&json).unwrap();
-            let batches: Vec<RecordBatch> = batches.clone().into_iter()
-                .map(|b| RecordBatch::try_new(Arc::new(schema.clone()), b.columns().to_vec()).unwrap())
-                .collect();
 
-            match self.inner.tables.try_borrow_mut() {
-                Ok(mut tables) => {
-                    tables.insert(table_id, Table { batches: batches });
-                },
-                Err(_) => {
-                    console::log_1(&"Cannot update schema: a table is immutably borrowed".into());
+            if batches.len() > 0 {
+                let batches: Vec<RecordBatch> = batches.clone().into_iter()
+                    .map(|b| {
+                        // Batches may have metadata for list types, which should be discarded
+                        let columns: Vec<ArrayRef> = b.columns().into_iter().map(|c| discard_nested_metadata(c)).collect();
+
+                        RecordBatch::try_new(Arc::new(schema.clone()), columns.to_vec()).unwrap()
+                    })
+                    .collect();
+
+                match self.inner.tables.try_borrow_mut() {
+                    Ok(mut tables) => {
+                        tables.insert(table_id, Table { batches: batches });
+                    },
+                    Err(_) => {
+                        console::log_1(&"Cannot update schema: a table is immutably borrowed".into());
+                    }
                 }
             }
         } else {

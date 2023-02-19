@@ -1,6 +1,6 @@
 use datafusion::arrow::array;
-use datafusion::arrow::array::{Array, ArrayRef};
-use datafusion::arrow::datatypes::DataType;
+use datafusion::arrow::array::{Array, ArrayRef, ArrayData};
+use datafusion::arrow::datatypes::{DataType, Field};
 
 
 macro_rules! as_string_array {
@@ -29,6 +29,35 @@ pub fn to_string_array(data_type: DataType, array_ref: ArrayRef) -> String {
     }
 }
 
+/*
+ * Drop metadata from fields in nested datatypes
+ *
+ * When loading data from parquet, it may have metadata like: `Some({"PARQUET:field_id": "3"})`.
+ * This is problematic when trying to merge or alter schemas, because the data types won't match.
+ * Because this metadata is pointless at this stage, we just drop it.
+ *
+ * Note that this drops all metadata.
+ */
+pub fn discard_nested_metadata(array_ref: &ArrayRef) -> ArrayRef {
+    match array_ref.data_type() {
+        // TODO: handle nested lists
+        DataType::List(field) => {
+            let data = array_ref.data();
+
+            // Take all the original fields, except for datatype
+            ArrayRef::from(ArrayData::try_new(
+                DataType::List(Box::new(Field::new(field.name(), field.data_type().clone(), field.is_nullable()))),
+                data.len(),
+                Some(data.null_count()),
+                data.null_buffer().and_then(|b| Some(b.clone())),
+                data.offset(),
+                data.buffers().to_vec(),
+                data.child_data().to_vec()
+            ).unwrap())
+        },
+        _ => array_ref.clone()
+    }
+}
 
 #[cfg(test)]
 mod tests {
