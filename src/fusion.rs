@@ -129,6 +129,7 @@ impl DataFusion {
                         let value: JsValue = if !row.is_null(0) {
                             match schema.field(i).data_type() {
                                 DataType::Int32 => row.as_any().downcast_ref::<array::Int32Array>().expect("").value(0).into(),
+                                DataType::Float32 => row.as_any().downcast_ref::<array::Float32Array>().expect("").value(0).into(),
                                 DataType::Float64 => row.as_any().downcast_ref::<array::Float64Array>().expect("").value(0).into(),
                                 DataType::Utf8 => row.as_any().downcast_ref::<array::StringArray>().expect("").value(0).into(),
                                 DataType::Boolean => row.as_any().downcast_ref::<array::BooleanArray>().expect("").value(0).to_string().into(),
@@ -355,7 +356,7 @@ impl DataFusion {
             clone_id
         };
 
-        let batches  = self.inner.tables.borrow().get(&table_id).unwrap().batches.clone();
+        let batches = self.inner.tables.borrow().get(&table_id).unwrap_or(&Table { batches: vec![] }).batches.clone();
         match self.inner.tables.try_borrow_mut() {
             Ok(mut tables) => {
                 tables.insert(id.clone(), Table { batches: batches });
