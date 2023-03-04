@@ -2,7 +2,7 @@ extern crate console_error_panic_hook;
 
 use wasm_bindgen::prelude::*;
 use web_sys::console;
-use js_sys::{Promise, Object, Uint8Array};
+use js_sys::{Promise, Object, Uint8Array, Error};
 use serde_json::value::Value;
 use serde_json::json;
 
@@ -26,7 +26,7 @@ use datafusion::logical_plan::{plan, Expr};
 use datafusion::physical_plan::aggregates;
 use datafusion::execution::dataframe_impl::DataFrameImpl;
 use datafusion::datasource::MemTable;
-use datafusion::error::Result;
+use datafusion::error::Result as DataFusionResult;
 use datafusion::prelude::*;
 
 use crate::tag::*;
@@ -79,28 +79,26 @@ impl DataFusion {
         }
     }
 
-    pub fn get_schema(&self, table_id: String) -> JsValue {
+    pub fn get_schema(&self, table_id: String) -> Result<JsValue, JsValue> {
         match self.inner.tables.borrow().get(&table_id) {
             Some(table) => {
                 if table.batches.len() > 0 {
                     let batch = &table.batches[0];
                     let schema = batch.schema();
 
-                    JsValue::from_serde(&schema.to_json()).unwrap()
+                    Ok(JsValue::from_serde(&schema.to_json()).unwrap())
 
                 } else {
-                    console::log_1(&"Unable to get schema: empty table".into());
-                    JsValue::undefined()
+                    Err(Error::new("Unable to get schema: empty table").into())
                 }
             },
             None => {
-                console::log_1(&"Invalid table id".into());
-                JsValue::undefined()
+                Err(Error::new("Invalid table id").into())
             }
         }
     }
 
-    pub fn get_row(&self, table_id: String, row_id: usize) -> Object {
+    pub fn get_row(&self, table_id: String, row_id: usize) -> Result<Object, JsValue> {
         let obj = js_sys::Object::new();
 
         match self.inner.tables.borrow().get(&table_id) {
@@ -165,7 +163,7 @@ impl DataFusion {
             None => {}
         }
 
-        obj
+        Ok(obj)
     }
 
     pub fn describe_table(&self, table_id: String) -> Promise {
@@ -182,15 +180,12 @@ impl DataFusion {
                         Ok(JsValue::from_serde(&json!(result)).unwrap())
                     },
                     Err(e) => {
-                        console::log_2(&"Error describing column:".into(), &e.to_string().into());
-
-                        Err(JsValue::undefined())
+                        Err(Error::new(&format!("Error describing column: {}", &e.to_string())).into())
                     },
                 }
             })
         } else {
-            console::log_1(&"Unable to describe table: empty table".into());
-            wasm_bindgen_futures::future_to_promise(std::future::ready(Err(JsValue::undefined())))
+            wasm_bindgen_futures::future_to_promise(std::future::ready(Err(Error::new("Unable to describe table: empty table").into())))
         }
     }
 
@@ -214,28 +209,25 @@ impl DataFusion {
                                         tables.insert(out_table_id.clone(), Table { batches: vec![batch] });
                                         Ok(out_table_id.into())
                                     },
-                                    Err(_) => Err(JsValue::undefined())
+                                    Err(_) => Err(Error::new("Cannot save synthesized table result").into())
                                 }
                             },
                             Err(e) => {
-                                console::log_2(&"Error building synthesized table:".into(), &e.to_string().into());
-                                Err(JsValue::undefined())
+                                Err(Error::new(&format!("Error building synthesized table: {}", &e.to_string())).into())
                             }
                         }
                     },
                     Err(e) => {
-                        console::log_2(&"Error describing column:".into(), &e.to_string().into());
-                        Err(JsValue::undefined())
+                        Err(Error::new(&format!("Error describing column: {}", &e.to_string())).into())
                     },
                 }
             })
         } else {
-            console::log_1(&"Unable to synthesize table: empty table".into());
-            wasm_bindgen_futures::future_to_promise(std::future::ready(Err(JsValue::undefined())))
+            wasm_bindgen_futures::future_to_promise(std::future::ready(Err(Error::new("Unable to synthesize table: empty table").into())))
         }
     }
 
-    pub fn update_schema(&self, table_id: String, schema: JsValue) -> () {
+    pub fn update_schema(&self, table_id: String, schema: JsValue) -> Result<(), JsValue> {
         let table_exists = self.inner.tables.borrow().contains_key(&table_id);
 
         if table_exists {
@@ -256,18 +248,21 @@ impl DataFusion {
                 match self.inner.tables.try_borrow_mut() {
                     Ok(mut tables) => {
                         tables.insert(table_id, Table { batches: batches });
+                        Ok(())
                     },
                     Err(_) => {
-                        console::log_1(&"Cannot update schema: a table is immutably borrowed".into());
+                        Err(Error::new("Cannot update schema: a table is immutably borrowed").into())
                     }
                 }
+            } else {
+                Err(Error::new("Cannot update schema: empty table").into())
             }
         } else {
-            console::log_1(&"Cannot update schema: invalid table id".into());
-        };
+            Err(Error::new("Cannot update schema: invalid table id").into())
+        }
     }
 
-    pub fn drop_columns(&self, table_id: String, drop_columns: JsValue) -> () {
+    pub fn drop_columns(&self, table_id: String, drop_columns: JsValue) -> Result<(), JsValue> {
         let batches = self.inner.tables.borrow().get(&table_id).unwrap_or(&Table { batches: vec![] }).batches.clone();
         let num_batches = batches.len();
         let columns: Vec<String> = JsValue::into_serde(&drop_columns).unwrap();
@@ -303,17 +298,18 @@ impl DataFusion {
             match self.inner.tables.try_borrow_mut() {
                 Ok(mut tables) => {
                     tables.insert(table_id, Table { batches: batches });
+                    Ok(())
                 },
                 Err(_) => {
-                    console::log_1(&"Cannot drop columns: a table is immutably borrowed".into());
+                    Err(Error::new("Cannot drop columns: a table is immutably borrowed").into())
                 }
             }
         } else {
-            console::log_1(&"Cannot drop columns: invalid table id".into());
-        };
+            Err(Error::new("Cannot drop columns: invalid table id").into())
+        }
     }
 
-    pub fn load_table(&self, table: &[u8], table_id: String) -> String {
+    pub fn load_table(&self, table: &[u8], table_id: String) -> Result<String, JsValue> {
         let id = if table_id.is_empty() {
             Uuid::new_v4().to_hyphenated().to_string()
         } else {
@@ -330,17 +326,19 @@ impl DataFusion {
             match self.inner.tables.try_borrow_mut() {
                 Ok(mut tables) => {
                     tables.insert(id.clone(), Table { batches: batches });
+
+                    Ok(id)
                 },
                 Err(_) => {
-                    console::log_1(&"Cannot load table: a table is immutably borrowed".into());
+                    Err(Error::new("Cannot load table: a table is immutably borrowed").into())
                 }
             }
+        } else {
+            Err(Error::new("Cannot load empty table").into())
         }
-
-        id
     }
 
-    pub fn clone_table(&self, table_id: String, clone_id: String) -> String {
+    pub fn clone_table(&self, table_id: String, clone_id: String) -> Result<String, JsValue> {
         let id = if clone_id.is_empty() {
             Uuid::new_v4().to_hyphenated().to_string()
         } else {
@@ -360,16 +358,16 @@ impl DataFusion {
         match self.inner.tables.try_borrow_mut() {
             Ok(mut tables) => {
                 tables.insert(id.clone(), Table { batches: batches });
+
+                Ok(id)
             },
             Err(_) => {
-                console::log_1(&"Cannot clone table: a table is immutably borrowed".into());
+                Err(Error::new("Cannot clone table: a table is immutably borrowed").into())
             }
-        };
-
-        id
+        }
     }
 
-    pub fn append_table(&self, table_id: String, append_id: String) -> () {
+    pub fn append_table(&self, table_id: String, append_id: String) -> Result<(), JsValue> {
         let in_batches = self.inner.tables.borrow().get(&table_id).unwrap_or(&Table { batches: vec![] }).batches.clone();
         let append_batches = self.inner.tables.borrow().get(&append_id).unwrap_or(&Table { batches: vec![] }).batches.clone();
 
@@ -391,15 +389,19 @@ impl DataFusion {
                 Ok(mut tables) => {
                     tables.insert(table_id, Table { batches: batches });
                     tables.remove(&append_id);
+
+                    Ok(())
                 },
                 Err(_) => {
-                    console::log_1(&"Cannot append table: a table is immutably borrowed".into());
+                    Err(Error::new("Cannot append table: a table is immutably borrowed").into())
                 }
-            };
+            }
+        } else {
+            Err(Error::new("Cannot append an empty table").into())
         }
     }
 
-    pub fn merge_table(&self, table_id: String, merge_id: String) -> () {
+    pub fn merge_table(&self, table_id: String, merge_id: String) -> Result<(), JsValue> {
         let in_batches = self.inner.tables.borrow().get(&table_id).unwrap_or(&Table { batches: vec![] }).batches.clone();
         let merge_batches = self.inner.tables.borrow().get(&merge_id).unwrap_or(&Table { batches: vec![] }).batches.clone();
 
@@ -435,15 +437,19 @@ impl DataFusion {
                 Ok(mut tables) => {
                     tables.insert(table_id, Table { batches: batches });
                     tables.remove(&merge_id);
+
+                    Ok(())
                 },
                 Err(_) => {
-                    console::log_1(&"Cannot merge table: a table is immutably borrowed".into());
+                    Err(Error::new("Cannot merge table: a table is immutably borrowed").into())
                 }
-            };
+            }
+        } else {
+            Err(Error::new("Cannot merge an empty table").into())
         }
     }
 
-    pub fn move_table(&self, table_id: String, target_id: String) -> () {
+    pub fn move_table(&self, table_id: String, target_id: String) -> Result<(), JsValue> {
         let batches  = self.inner.tables.borrow().get(&table_id).unwrap().batches.clone();
 
         match self.inner.tables.try_borrow_mut() {
@@ -452,22 +458,26 @@ impl DataFusion {
                 tables.remove(&target_id);
 
                 tables.insert(target_id, Table { batches: batches });
+
+                Ok(())
             },
             Err(_) => {
-                console::log_1(&"Cannot move table: a table is immutably borrowed".into());
+                Err(Error::new("Cannot move table: a table is immutably borrowed").into())
             }
-        };
+        }
     }
 
-    pub fn drop_table(&self, table_id: String) {
+    pub fn drop_table(&self, table_id: String) -> Result<(), JsValue> {
         match self.inner.tables.try_borrow_mut() {
             Ok(mut tables) => {
                 tables.remove(&table_id);
+
+                Ok(())
             },
             Err(_) => {
-                console::log_1(&"Cannot drop table: a table is immutably borrowed".into());
+                Err(Error::new("Cannot drop table: a table is immutably borrowed").into())
             }
-        };
+        }
     }
 
     pub fn query(&self, table_id: String, query: String) -> Promise {
@@ -487,21 +497,17 @@ impl DataFusion {
                                 Ok(artifact.into())
                             },
                             Err(_) => {
-                                console::log_1(&"Cannot query table: a table is immutably borrowed".into());
-                                Err(JsValue::undefined())
+                                Err(Error::new("Cannot query table: a table is immutably borrowed").into())
                             }
                         }
                     },
                     Err(e) => {
-                        console::log_2(&"Error executing query:".into(), &e.to_string().into());
-
-                        Err(JsValue::undefined())
+                        Err(Error::new(&format!("Error executing query: {}", &e.to_string())).into())
                     },
                 }
             })
         } else {
-            console::log_1(&"Cannot query: empty table".into());
-            wasm_bindgen_futures::future_to_promise(std::future::ready(Err(JsValue::undefined())))
+            wasm_bindgen_futures::future_to_promise(std::future::ready(Err(Error::new("Cannot query: empty table").into())))
         }
     }
 
@@ -525,20 +531,17 @@ impl DataFusion {
                                 Ok(JsValue::from_serde(&json!([left_artifact, right_artifact])).unwrap())
                             },
                             Err(_) => {
-                                console::log_1(&"Cannot join: a table is immutably borrowed".into());
-                                Err(JsValue::undefined())
+                                Err(Error::new("Cannot join: a table is immutably borrowed").into())
                             }
                         }
                     },
                     Err(e) => {
-                        console::log_2(&"Cannot join:".into(), &e.to_string().into());
-                        Err(JsValue::undefined())
+                        Err(Error::new(&format!("Cannot perform join: {}", &e.to_string())).into())
                     },
                 }
             })
         } else {
-            console::log_1(&"Cannot join: one or more of the tables are empty".into());
-            wasm_bindgen_futures::future_to_promise(std::future::ready(Err(JsValue::undefined())))
+            wasm_bindgen_futures::future_to_promise(std::future::ready(Err(Error::new("Cannot join: one or more of the tables are empty").into())))
         }
     }
 
@@ -559,21 +562,17 @@ impl DataFusion {
                                 Ok(JsValue::undefined())
                             },
                             Err(_) => {
-                                console::log_1(&"Cannot apply artifact: a table is immutably borrowed".into());
-                                Err(JsValue::undefined())
+                                Err(Error::new("Cannot apply artifact: a table is immutably borrowed").into())
                             }
                         }
                     },
                     Err(_) => {
-                        console::log_1(&"Error applying artifact".into());
-
-                        Err(JsValue::undefined())
+                        Err(Error::new("Error applying artifact").into())
                     },
                 }
             })
         } else {
-            console::log_1(&"Cannot apply artifact: empty table".into());
-            wasm_bindgen_futures::future_to_promise(std::future::ready(Err(JsValue::undefined())))
+            wasm_bindgen_futures::future_to_promise(std::future::ready(Err(Error::new("Cannot apply artifact: empty table").into())))
         }
     }
 
@@ -627,7 +626,7 @@ impl DataFusion {
 ///
 /// The query artifact can be used to apply the same order / unnest operations on
 /// dataset fragments that are not part of the table in this context.
-async fn execute(table_id: &String, schema: Arc<Schema>, batches: Vec<RecordBatch>, query: String) -> Result<(Vec<RecordBatch>, String)> {
+async fn execute(table_id: &String, schema: Arc<Schema>, batches: Vec<RecordBatch>, query: String) -> DataFusionResult<(Vec<RecordBatch>, String)> {
     let mut ctx = ExecutionContext::new();
     register_table_with_tag(&mut ctx, table_id, schema, batches).await?;
 
@@ -642,7 +641,7 @@ async fn execute(table_id: &String, schema: Arc<Schema>, batches: Vec<RecordBatc
 ///
 /// Note that currently the query is executed twice to produce both the left
 /// and right side artifacts.
-async fn join(left_id: &String, right_id: &String, left_schema: Arc<Schema>, right_schema: Arc<Schema>, left_batches: Vec<RecordBatch>, right_batches: Vec<RecordBatch>, query: String) -> Result<(Vec<RecordBatch>, (String, String))> {
+async fn join(left_id: &String, right_id: &String, left_schema: Arc<Schema>, right_schema: Arc<Schema>, left_batches: Vec<RecordBatch>, right_batches: Vec<RecordBatch>, query: String) -> DataFusionResult<(Vec<RecordBatch>, (String, String))> {
     let mut ctx = ExecutionContext::new();
 
     // Register the left table with tags, right without
@@ -671,7 +670,7 @@ async fn join(left_id: &String, right_id: &String, left_schema: Arc<Schema>, rig
     Ok((result, (left_artifact, right_artifact)))
 }
 
-async fn _execute(ctx: &mut ExecutionContext, plan: plan::LogicalPlan) -> Result<(Vec<RecordBatch>, String)> {
+async fn _execute(ctx: &mut ExecutionContext, plan: plan::LogicalPlan) -> DataFusionResult<(Vec<RecordBatch>, String)> {
     // Execute the modified query
     let df = Arc::new(DataFrameImpl::new(
         ctx.state.clone(),
@@ -732,7 +731,7 @@ async fn _execute(ctx: &mut ExecutionContext, plan: plan::LogicalPlan) -> Result
 ///     NOTE: Order in middle aggregates is not retained
 ///
 /// Returns the resulting batches
-async fn apply_artifact(table_id: &String, schema: Arc<Schema>, batches: Vec<RecordBatch>, artifact: String) -> Result<Vec<RecordBatch>> {
+async fn apply_artifact(table_id: &String, schema: Arc<Schema>, batches: Vec<RecordBatch>, artifact: String) -> DataFusionResult<Vec<RecordBatch>> {
     let mut ctx = ExecutionContext::new();
     register_table_with_tag(&mut ctx, table_id, schema.clone(), batches).await?;
 
