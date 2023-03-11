@@ -1,0 +1,41 @@
+name: Publish NPM package
+
+on:
+  push:
+    tags:
+      - "*"
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: recursive
+      - name: Install wasm-pack
+        run: cargo install wasm-pack
+      - name: Setup node
+        uses: actions/setup-node@v3
+        with:
+          node-version: '16.x'
+          registry-url: 'https://npm.pkg.github.com'
+      - name: Patch datafusion for wasm
+        run: |
+          git clone -b 7.0.0 --single-branch https://github.com/apache/arrow-datafusion.git
+          cd arrow-datafusion.git
+          patch --force -p1 -i ../datafusion.patch
+      - name: Build
+        run: wasm-pack build --scope pixelcities
+      - name: Publish package
+        run: |
+          cd pkg
+          npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
