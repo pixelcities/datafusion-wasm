@@ -28,7 +28,7 @@ jobs:
       - name: Patch datafusion for wasm
         run: |
           git clone -b 7.0.0 --single-branch https://github.com/apache/arrow-datafusion.git
-          cd arrow-datafusion.git
+          cd arrow-datafusion
           patch --force -p1 -i ../datafusion.patch
       - name: Build
         run: wasm-pack build --scope pixelcities
