@@ -1,6 +1,8 @@
+use web_sys::console;
 use std::sync::Arc;
 use serde::{Serialize, Deserialize};
 use serde_json::value::Value;
+use serde_json::json;
 use probability::prelude::*;
 use rand::rngs::OsRng;
 use rand::distributions::{Distribution as RandDistribution, uniform, Uniform, WeightedIndex};
@@ -11,6 +13,7 @@ use datafusion::arrow::{
     array::ArrayRef,
     datatypes,
     datatypes::{ArrowPrimitiveType, ArrowNativeType, DataType, TimeUnit, Schema},
+    temporal_conversions::{date32_to_datetime, date64_to_datetime},
     record_batch::RecordBatch,
 };
 use datafusion::datasource::MemTable;
@@ -341,8 +344,13 @@ fn to_value(data_type: &DataType, value_array: ArrayRef) -> Value {
         DataType::Utf8 => value_array.as_any().downcast_ref::<array::StringArray>().expect("").value(0).into(),
         DataType::Boolean => value_array.as_any().downcast_ref::<array::BooleanArray>().expect("").value(0).into(),
         DataType::Timestamp(TimeUnit::Second, None) => value_array.as_any().downcast_ref::<array::TimestampSecondArray>().expect("").value(0).into(),
+        DataType::Date32 => date32_to_datetime(value_array.as_any().downcast_ref::<array::Date32Array>().expect("").value(0)).date().to_string().into(),
+        DataType::Date64 => date64_to_datetime(value_array.as_any().downcast_ref::<array::Date64Array>().expect("").value(0)).to_string().into(),
         DataType::Int64 => (value_array.as_any().downcast_ref::<array::Int64Array>().expect("").value(0) as f64).into(),
-        _ => panic!("Unsupported data type")
+        other => {
+            console::log_2(&"Warning: unexpected data type: ".into(), &json!(other).to_string().into());
+            panic!("Unsupported data type")
+        }
     }
 }
 

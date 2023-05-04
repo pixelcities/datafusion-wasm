@@ -15,6 +15,7 @@ use std::str::FromStr;
 use uuid::Uuid;
 
 use datafusion::arrow::array;
+use datafusion::arrow::temporal_conversions::{date32_to_datetime, date64_to_datetime};
 use datafusion::arrow::array::ArrayRef;
 use datafusion::arrow::datatypes::{DataType, TimeUnit, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -132,6 +133,8 @@ impl DataFusion {
                                 DataType::Utf8 => row.as_any().downcast_ref::<array::StringArray>().expect("").value(0).into(),
                                 DataType::Boolean => row.as_any().downcast_ref::<array::BooleanArray>().expect("").value(0).to_string().into(),
                                 DataType::Timestamp(TimeUnit::Second, None) => row.as_any().downcast_ref::<array::TimestampSecondArray>().expect("").value(0).into(),
+                                DataType::Date32 => date32_to_datetime(row.as_any().downcast_ref::<array::Date32Array>().expect("").value(0)).date().to_string().into(),
+                                DataType::Date64 => date64_to_datetime(row.as_any().downcast_ref::<array::Date64Array>().expect("").value(0)).to_string().into(),
                                 DataType::Null => JsValue::null(),
 
                                 // Gets cast to BigInt, which is not that common. Just force Number instead
