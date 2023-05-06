@@ -78,19 +78,29 @@ pub async fn describe(table_id: &String, schema: Arc<Schema>, batches: Vec<Recor
     let mut descriptions: Vec<ColumnDescription> = Vec::new();
     for field in schema.fields() {
         let min = {
-            let result = ctx.table(table_id.as_str())?
-                .aggregate(vec![], vec![min(col(field.name()))])?
-                .collect().await?;
+            if field.data_type() != &DataType::Null {
+                let result = ctx.table(table_id.as_str())?
+                    .aggregate(vec![], vec![min(col(field.name()))])?
+                    .collect().await?;
 
-            to_value(field.data_type(), result[0].column(0).clone())
+                to_value(field.data_type(), result[0].column(0).clone())
+
+            } else {
+                Value::Null
+            }
         };
 
         let max = {
-            let result = ctx.table(table_id.as_str())?
-                .aggregate(vec![], vec![max(col(field.name()))])?
-                .collect().await?;
+            if field.data_type() != &DataType::Null {
+                let result = ctx.table(table_id.as_str())?
+                    .aggregate(vec![], vec![max(col(field.name()))])?
+                    .collect().await?;
 
-            to_value(field.data_type(), result[0].column(0).clone())
+                to_value(field.data_type(), result[0].column(0).clone())
+
+            } else {
+                Value::Null
+            }
         };
 
         let bins: Distribution = {
