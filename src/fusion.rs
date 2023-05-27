@@ -192,20 +192,35 @@ impl DataFusion {
         }
     }
 
-    pub fn synthesize_table(&self, in_table_id: String, out_table_id: String, epsilon: f64) -> Promise {
+    pub fn synthesize_table(&self, in_table_id: String, out_table_id: String, weights: JsValue, epsilon: f64) -> Promise {
+        // [["column_name", 0.25], ...]
+        let weights: HashMap<String, f64> = weights.into_serde::<Vec<(String, f64)>>().unwrap().into_iter().collect();
+
         let _self = self.inner.clone();
         let batches = _self.tables.borrow().get(&in_table_id).unwrap_or(&Table { batches: vec![]}).batches.clone();
 
         if batches.len() > 0 {
+            let n = batches[0].num_columns();
             let schema = batches[0].schema();
 
             wasm_bindgen_futures::future_to_promise(async move {
                 match describe(&in_table_id, schema.clone(), batches, None).await {
                     Ok(result) => {
-                        let description = add_laplace_noise(result, epsilon);
+                        let description = add_laplace_noise(result, weights.clone(), epsilon);
                         let arrays = gen_synthethic_dataset(description);
+                        let filtered_schema = {
+                            let fields = (0..n).filter_map(|i| {
+                                if weights.contains_key(schema.field(i).name()) {
+                                    Some(schema.field(i).clone())
+                                } else {
+                                    None
+                                }
+                            }).collect();
 
-                        match RecordBatch::try_new(schema, arrays) {
+                            Arc::new(Schema::new(fields))
+                        };
+
+                        match RecordBatch::try_new(filtered_schema, arrays) {
                             Ok(batch) => {
                                 match _self.tables.try_borrow_mut() {
                                     Ok(mut tables) => {

@@ -1,5 +1,6 @@
 use web_sys::console;
 use std::sync::Arc;
+use std::collections::hash_map::HashMap;
 use serde::{Serialize, Deserialize};
 use serde_json::value::Value;
 use serde_json::json;
@@ -206,48 +207,57 @@ pub async fn describe(table_id: &String, schema: Arc<Schema>, batches: Vec<Recor
     })
 }
 
-pub fn add_laplace_noise(description: TableDescription, epsilon: f64) -> TableDescription {
-    let num_rows = description.num_rows;
-    let nr_attributes = description.attributes.len();
+pub fn add_laplace_noise(description: TableDescription, weights: HashMap<String, f64>, epsilon: f64) -> TableDescription {
     let mut source = Source(OsRng);
 
-    let descriptions = description.descriptions.into_iter().map(|column| {
-        let probabilities = column.distribution.probabilities.clone();
+    let num_rows = description.num_rows;
+    let target_attributes = description.attributes.into_iter().filter(|name| weights.contains_key(name)).collect::<Vec<String>>();
 
-        let sensitivity = 2. / num_rows as f64;
-        let budget = epsilon / nr_attributes as f64;
-        let scale = sensitivity / budget;
+    let target_descriptions = description.descriptions.into_iter()
+        .filter_map(|column| {
+            let maybe_weight = weights.get(&column.name).clone();
 
-        let distribution = Laplace::new(0., scale);
-        let mut sampler = Independent(&distribution, &mut source);
+            match maybe_weight {
+                Some(weight) => {
+                    let probabilities = column.distribution.probabilities.clone();
 
-        let noisy_probabilities = probabilities.iter().map(|p| p + sampler.next().unwrap()).collect::<Vec<f64>>();
-        let normalized_probabilities = if probabilities.len() > 0 {
-            let min = noisy_probabilities.iter().min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)).unwrap().clone();
-            let diff = if min < 0. { min.abs() } else { 0. };
-            let total = noisy_probabilities.iter().map(|p| p + diff).sum::<f64>();
+                    let sensitivity = 2. / num_rows as f64;
+                    let budget = epsilon * weight;
+                    let scale = sensitivity / budget;
 
-            noisy_probabilities.into_iter().map(|p| (p + diff) / total).collect::<Vec<f64>>()
-        } else {
-            probabilities
-        };
+                    let distribution = Laplace::new(0., scale);
+                    let mut sampler = Independent(&distribution, &mut source);
 
-        ColumnDescription {
-            name: column.name,
-            data_type: column.data_type,
-            min: column.min,
-            max: column.max,
-            distribution: Distribution {
-                bins: column.distribution.bins,
-                probabilities: normalized_probabilities
+                    let noisy_probabilities = probabilities.iter().map(|p| p + sampler.next().unwrap()).collect::<Vec<f64>>();
+                    let normalized_probabilities = if probabilities.len() > 0 {
+                        let min = noisy_probabilities.iter().min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)).unwrap().clone();
+                        let diff = if min < 0. { min.abs() } else { 0. };
+                        let total = noisy_probabilities.iter().map(|p| p + diff).sum::<f64>();
+
+                        noisy_probabilities.into_iter().map(|p| (p + diff) / total).collect::<Vec<f64>>()
+                    } else {
+                        probabilities
+                    };
+
+                    Some(ColumnDescription {
+                        name: column.name,
+                        data_type: column.data_type,
+                        min: column.min,
+                        max: column.max,
+                        distribution: Distribution {
+                            bins: column.distribution.bins,
+                            probabilities: normalized_probabilities
+                        }
+                    })
+                },
+                None => None
             }
-        }
-    }).collect::<Vec<ColumnDescription>>();
+        }).collect::<Vec<ColumnDescription>>();
 
     TableDescription {
         num_rows: description.num_rows,
-        attributes: description.attributes,
-        descriptions: descriptions
+        attributes: target_attributes,
+        descriptions: target_descriptions
     }
 }
 
@@ -411,7 +421,7 @@ mod tests {
         let schema = batch.schema();
 
         tokio_test::block_on(async move {
-            let description = add_laplace_noise(describe(&table_id, schema.clone(), vec![batch.clone()], Some(2)).await.unwrap(), 0.1);
+            let description = add_laplace_noise(describe(&table_id, schema.clone(), vec![batch.clone()], Some(2)).await.unwrap(), [], 0.1);
 
             for c in description.descriptions {
                 let total = c.distribution.probabilities.iter().sum::<f64>();
@@ -477,7 +487,7 @@ mod tests {
         let description: TableDescription = serde_json::from_str(data).unwrap();
 
         tokio_test::block_on(async move {
-            let arrays = gen_synthethic_dataset(add_laplace_noise(description, 0.1));
+            let arrays = gen_synthethic_dataset(add_laplace_noise(description, [], 0.1));
 
             assert_eq!(arrays.len(), 3);
         });
