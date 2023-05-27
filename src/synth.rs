@@ -267,7 +267,7 @@ pub fn gen_synthethic_dataset(description: TableDescription) -> Vec<ArrayRef> {
         } else if column.data_type == DataType::Utf8 {
             build_categorical_array(num_rows, column, &mut rng)
         } else {
-            build_empty_array(num_rows)
+            build_empty_array(&column.data_type, num_rows)
         }
     }).collect::<Vec<ArrayRef>>()
 }
@@ -336,8 +336,8 @@ fn build_categorical_array(num_rows: usize, column: ColumnDescription, rng: &mut
     }
 }
 
-fn build_empty_array(num_rows: usize) -> ArrayRef {
-    Arc::new(array::NullArray::new(num_rows))
+fn build_empty_array(data_type: &DataType, num_rows: usize) -> ArrayRef {
+    Arc::new(array::new_null_array(data_type, num_rows))
 }
 
 fn is_numeric(data_type: &DataType) -> bool {
