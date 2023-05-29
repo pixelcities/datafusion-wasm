@@ -31,13 +31,13 @@ impl<T: rand::RngCore> source::Source for Source<T> {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct Distribution {
     bins: Value,
     probabilities: Vec<f64>
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct ColumnDescription {
     name: String,
     data_type: DataType,
@@ -52,7 +52,7 @@ impl ColumnDescription {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TableDescription {
     num_rows: usize,
     attributes: Vec<String>,
@@ -261,6 +261,7 @@ pub fn add_laplace_noise(description: TableDescription, weights: HashMap<String,
     }
 }
 
+// TODO: Use a seed?
 pub fn gen_synthethic_dataset(description: TableDescription) -> Vec<ArrayRef> {
     let mut rng = OsRng;
     let num_rows = description.num_rows;

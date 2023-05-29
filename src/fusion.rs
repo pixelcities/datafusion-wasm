@@ -207,7 +207,7 @@ impl DataFusion {
                 match describe(&in_table_id, schema.clone(), batches, None).await {
                     Ok(result) => {
                         let description = add_laplace_noise(result, weights.clone(), epsilon);
-                        let arrays = gen_synthethic_dataset(description);
+                        let arrays = gen_synthethic_dataset(description.clone());
                         let filtered_schema = {
                             let fields = (0..n).filter_map(|i| {
                                 if weights.contains_key(schema.field(i).name()) {
@@ -225,7 +225,7 @@ impl DataFusion {
                                 match _self.tables.try_borrow_mut() {
                                     Ok(mut tables) => {
                                         tables.insert(out_table_id.clone(), Table { batches: vec![batch] });
-                                        Ok(out_table_id.into())
+                                        Ok(JsValue::from_serde(&json!(description)).unwrap())
                                     },
                                     Err(_) => Err(Error::new("Cannot save synthesized table result").into())
                                 }
