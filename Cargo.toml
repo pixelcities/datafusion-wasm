@@ -1,6 +1,6 @@
 [package]
 name = "datafusion-wasm"
-version = "0.1.4"
+version = "0.1.5"
 authors = ["PixelCities"]
 edition = "2018"
 
@@ -24,6 +24,9 @@ uuid = { version = "0.8.2", features = [ "v4", "wasm-bindgen" ]}
 rand = { version = "0.7.3", features = ["wasm-bindgen"] }
 probability = "0.20.3"
 num = "0.4.0"
+calamine = "0.21.2"
+csv-sniffer = "0.3.1"
+base64 = "0.21.2"
 
 # datafusion = { version = "7.0.0" }
 datafusion = { path = "./arrow-datafusion/datafusion" }

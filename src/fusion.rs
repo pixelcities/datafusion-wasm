@@ -32,6 +32,7 @@ use datafusion::prelude::*;
 
 use crate::tag::*;
 use crate::synth::*;
+use crate::sheet::*;
 use crate::utils::*;
 
 
@@ -591,6 +592,62 @@ impl DataFusion {
             })
         } else {
             wasm_bindgen_futures::future_to_promise(std::future::ready(Err(Error::new("Cannot apply artifact: empty table").into())))
+        }
+    }
+
+    pub fn load_csv(&self, data: &[u8], table_id: String) -> Result<String, JsValue> {
+        let id = if table_id.is_empty() {
+            Uuid::new_v4().to_hyphenated().to_string()
+        } else {
+            table_id
+        };
+
+        match parse_csv(data) {
+            Ok(batches) => {
+                if batches.len() > 0 {
+                    match self.inner.tables.try_borrow_mut() {
+                        Ok(mut tables) => {
+                            tables.insert(id.clone(), Table { batches: batches });
+
+                            Ok(id)
+                        },
+                        Err(_) => {
+                            Err(Error::new("Cannot load csv: a table is immutably borrowed").into())
+                        }
+                    }
+                } else {
+                    Err(Error::new("Cannot load empty csv").into())
+                }
+            },
+            Err(e) => Err(Error::new(&format!("Error parsing csv: {}", e.to_string())).into())
+        }
+    }
+
+    pub fn load_sheet(&self, data: &[u8], table_id: String) -> Result<String, JsValue> {
+        let id = if table_id.is_empty() {
+            Uuid::new_v4().to_hyphenated().to_string()
+        } else {
+            table_id
+        };
+
+        match parse_sheet(data) {
+            Ok(batches) => {
+                if batches.len() > 0 {
+                    match self.inner.tables.try_borrow_mut() {
+                        Ok(mut tables) => {
+                            tables.insert(id.clone(), Table { batches: batches });
+
+                            Ok(id)
+                        },
+                        Err(_) => {
+                            Err(Error::new("Cannot load sheet: a table is immutably borrowed").into())
+                        }
+                    }
+                } else {
+                    Err(Error::new("Cannot load empty sheet").into())
+                }
+            },
+            Err(e) => Err(Error::new(&format!("Error parsing sheet: {}", e.to_string())).into())
         }
     }
 

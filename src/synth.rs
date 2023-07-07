@@ -422,7 +422,7 @@ mod tests {
         let schema = batch.schema();
 
         tokio_test::block_on(async move {
-            let description = add_laplace_noise(describe(&table_id, schema.clone(), vec![batch.clone()], Some(2)).await.unwrap(), [], 0.1);
+            let description = add_laplace_noise(describe(&table_id, schema.clone(), vec![batch.clone()], Some(2)).await.unwrap(), [].into(), 0.1);
 
             for c in description.descriptions {
                 let total = c.distribution.probabilities.iter().sum::<f64>();
@@ -488,7 +488,7 @@ mod tests {
         let description: TableDescription = serde_json::from_str(data).unwrap();
 
         tokio_test::block_on(async move {
-            let arrays = gen_synthethic_dataset(add_laplace_noise(description, [], 0.1));
+            let arrays = gen_synthethic_dataset(add_laplace_noise(description, [].into(), 0.1));
 
             assert_eq!(arrays.len(), 3);
         });

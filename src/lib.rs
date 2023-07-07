@@ -6,6 +6,7 @@ mod fusion;
 mod string_agg;
 mod tag;
 mod synth;
+mod sheet;
 mod utils;
 
 pub use {
