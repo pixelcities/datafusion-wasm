@@ -595,6 +595,37 @@ impl DataFusion {
         }
     }
 
+    pub fn test_constraint(&self, table_id: String, column_id: String, constraint: String) -> Promise {
+        let _self = self.inner.clone();
+        let batches = _self.tables.borrow().get(&table_id).unwrap_or(&Table { batches: vec![] }).batches.clone();
+
+        let query = format!("SELECT COUNT(*) FROM \"{}\" WHERE NOT \"{}\" {}", &table_id, &column_id, &constraint);
+
+        if batches.len() > 0 {
+            let schema = batches[0].schema();
+
+            wasm_bindgen_futures::future_to_promise(async move {
+                let batches = execute(&table_id, schema, batches, query).await;
+                match batches {
+                    Ok((batches, _)) => {
+                        let count = if batches.len() > 0 {
+                            (batches[0].column(0).as_any().downcast_ref::<array::UInt64Array>().expect("x").value(0) as u64).into()
+                        } else {
+                            1 as u64
+                        };
+
+                        Ok((count == 0).into())
+                    },
+                    Err(e) => {
+                        Err(Error::new(&format!("Error executing constraint test: {}", &e.to_string())).into())
+                    },
+                }
+            })
+        } else {
+            wasm_bindgen_futures::future_to_promise(std::future::ready(Err(Error::new("Cannot test constraint: empty table").into())))
+        }
+    }
+
     pub fn load_csv(&self, data: &[u8], table_id: String) -> Result<String, JsValue> {
         let id = if table_id.is_empty() {
             Uuid::new_v4().to_hyphenated().to_string()
