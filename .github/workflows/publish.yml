@@ -31,7 +31,7 @@ jobs:
           cd arrow-datafusion
           patch --force -p1 -i ../datafusion.patch
       - name: Build
-        run: wasm-pack build --scope pixelcities
+        run: make build
       - name: Publish package
         run: |
           cd pkg
